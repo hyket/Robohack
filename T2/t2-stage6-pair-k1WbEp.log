@@ -1,0 +1,11 @@
+Run=go1-local-2491e389a8d14207 domain=163 task=T2
+Simulator=go1-local-2491e389a8d14207-sim
+Participant=go1-local-2491e389a8d14207-participant
+Simulator ready: clock + state/ready payloads
+Pair started; Ctrl+C to stop. Logs: docker logs -f CONTAINER
+[INFO] [launch]: All log files can be found below /home/ros/.ros/log/2026-11-20-12-19-03-108211-ubuntu24-1
+[INFO] [launch]: Default logging verbosity is set to INFO
+[INFO] [go1_mujoco.py-1]: process started with pid [80]
+[go1_mujoco.py-1] [0m[INFO] [1795177145.395251215] [go1_mujoco]: MuJoCo Go1 готов: 12 приводов, box=False, flip=False, headless=True. Команды: /lowcmd; состояние: /lowstate[0m
+[WARN] [1795177148.920367465] [safety_block]: Команда отклонена: FR_hip.kp: 1001 вне [0, 1000]
+Cleaned go1-local-2491e389a8d14207 (exit 143)
