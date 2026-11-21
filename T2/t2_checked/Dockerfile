@@ -26,16 +26,13 @@ RUN python3 -m pip install --no-cache-dir --no-deps --only-binary=:all: \
     --require-hashes -r /opt/t2/requirements.lock
 COPY --from=unitree_interfaces /opt/unitree /opt/unitree
 COPY model/ /opt/t2/model/
-COPY t2_collision_pairs.csv /opt/t2/model/t2_collision_pairs.csv
-COPY safety_block.py collision_guard.py /opt/t2/
+COPY safety_block.py collision_guard.py t2_checks.py t2_collision_pairs.csv /opt/t2/
 COPY NOTICE-go1-MIT.txt /usr/local/share/doc/t2/
 COPY vendor/NOTICE-unitree-BSD.txt /usr/local/share/doc/t2/
 COPY --chmod=0755 entrypoint.sh /entrypoint.sh
 RUN useradd --create-home --uid 10001 participant
 
 ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp \
-    GO1_MUJOCO_MODEL_DIR=/opt/t2/model \
-    T2_COLLISION_CSV=/opt/t2/model/t2_collision_pairs.csv \
     PYTHONUNBUFFERED=1
 USER participant
 WORKDIR /opt/t2

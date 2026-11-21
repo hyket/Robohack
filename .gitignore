@@ -1,0 +1,9 @@
+.DS_Store
+/.idea/
+__pycache__/
+*.pyc
+.ruff_cache/
+
+# Local copy of the public simulator.
+/T3/go1-simulator-public-*/
+/T3/go1-simulator-public-*.zip

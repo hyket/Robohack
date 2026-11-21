@@ -37,9 +37,10 @@ class CollisionGuard:
                 for index, geom_id in enumerate((first, second), 1):
                     if not 0 <= geom_id < self.model.ngeom:
                         raise ValueError(f"Геометрия {geom_id} из CSV отсутствует в модели.")
-                    name = self.mujoco.mj_id2name(
-                        self.model, self.mujoco.mjtObj.mjOBJ_GEOM, geom_id
-                    ) or f"UNNAMED_geom_{geom_id}"
+                    name = (
+                        self.mujoco.mj_id2name(self.model, self.mujoco.mjtObj.mjOBJ_GEOM, geom_id)
+                        or f"UNNAMED_geom_{geom_id}"
+                    )
                     body_id = int(self.model.geom_bodyid[geom_id])
                     if name != row[f"geom{index}"] or body_id != int(row[f"body{index}_id"]):
                         raise ValueError(f"Геометрия {geom_id} в CSV не совпадает с моделью Go1.")
@@ -75,8 +76,12 @@ class CollisionGuard:
         segments = max(1, ceil(max(map(abs, differences)) / MAX_SAMPLE_STEP))
         for index in range(segments + 1):
             fraction = index / segments
-            angles = target if index == segments else tuple(
-                start + fraction * change for start, change in zip(previous, differences)
+            angles = (
+                target
+                if index == segments
+                else tuple(
+                    start + fraction * change for start, change in zip(previous, differences)
+                )
             )
             hit = self.pose_collision(angles)
             if hit:

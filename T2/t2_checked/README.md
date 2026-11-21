@@ -14,9 +14,11 @@ NaN или Inf в любом из пяти управляющих полей л�
 
 ## Сборка и локальная проверка
 
-На Ubuntu с Docker и Buildx выполни из папки проекта:
+На Ubuntu с Docker, Buildx и Compose выполни команды из папки проекта.
 
 ```bash
+export SIM_IMAGE=registry.cookcloud.ru/go1-hackathon-remote-stage/go1-sim:v1.0
+docker pull --platform linux/amd64 "$SIM_IMAGE"
 bash t2_etap6.sh
 ```
 
@@ -38,6 +40,22 @@ docker buildx build --platform linux/amd64 --load -t go1-participant:t2 .
 
 - `/entrypoint.sh ping` возвращает один JSON с заявленным T2.
 - `/entrypoint.sh T2` запускает Safety Block на штатных ROS 2-топиках.
+
+## Проверки при разработке
+
+В каталоге `T2/t2_checked` активируй виртуальное окружение Python и выполни команды.
+
+```bash
+python -m pip install -r requirements-dev.txt
+ruff check .
+ruff format --check .
+
+python -m pip install numpy 'mujoco==3.3.7'
+python safety_block.py --self-test
+python safety_block.py --collision-test
+```
+
+Эти две проверки запускаются на Mac и Linux без ROS 2. Проверки обмена по ROS 2 и частоты публикации запускает `t2_etap6.sh`.
 
 ## Сдача
 

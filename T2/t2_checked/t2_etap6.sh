@@ -32,9 +32,11 @@ docker buildx build --platform linux/amd64 --load -t "$participant_image" "$proj
 printf '\n[2/3] Проверяю запуск участника без доступа к сети.\n'
 platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$participant_image")
 [[ $platform == linux/amd64 ]] || fail "Требуется linux/amd64, получено $platform."
-entry_uid=$(docker run --rm --network none --entrypoint id "$participant_image" -u)
+offline_run=(docker run --rm --platform linux/amd64 --pull never --network none)
+entry_uid=$("${offline_run[@]}" --entrypoint id "$participant_image" -u)
 [[ $entry_uid =~ ^[1-9][0-9]*$ ]] || fail 'Контейнер участника должен работать без root.'
-ping=$(timeout 10s docker run --rm --network none --entrypoint /entrypoint.sh "$participant_image" ping)
+ping=$(timeout 10s "${offline_run[@]}" --cap-drop ALL --security-opt no-new-privileges \
+    --entrypoint /entrypoint.sh "$participant_image" ping)
 python3 -c '
 import json, sys
 expected = {"protocol_version": "1.0", "supported_tasks": ["T2"],
@@ -44,9 +46,9 @@ if report != expected or report["self_trained_rl"] is not False:
     raise SystemExit("Некорректный JSON протокола ping")
 print("OK — ping: один JSON, T2 заявлен; пользователь UID " + sys.argv[2])
 ' "$ping" "$entry_uid"
-timeout 30s docker run --rm --network none --entrypoint /entrypoint.sh \
+timeout 30s "${offline_run[@]}" --entrypoint /entrypoint.sh \
     "$participant_image" T2 --collision-test
-timeout 30s docker run --rm --network none -e ROS_LOCALHOST_ONLY=1 --entrypoint /entrypoint.sh \
+timeout 30s "${offline_run[@]}" -e ROS_LOCALHOST_ONLY=1 --entrypoint /entrypoint.sh \
     "$participant_image" T2 --clock-test
 
 run_log=$(mktemp "$HOME/t2-stage6-pair-XXXXXX.log")
