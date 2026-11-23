@@ -1,0 +1,27 @@
+{
+  "segments": 7,
+  "mean_rpe": 0.012308847473981461,
+  "segment_rpe": [
+    0.018310544923889407,
+    0.018812425812825283,
+    0.0068218161528876805,
+    0.006083208349450492,
+    0.012350572027864956,
+    0.0077745113559234795,
+    0.016008853695028934
+  ],
+  "odom_mean_hz": 49.96886674968867,
+  "odom_max_gap_s": 0.03999999999999204,
+  "drift_m": 0.002109942110972624,
+  "drift_deg": 0.07812619721170469,
+  "drift_pass": true,
+  "actual_end_displacement_m": 0.002387076974380595,
+  "actual_end_rotation_deg": 0.09577655882600183,
+  "tf_mean_hz": 49.9688570538773,
+  "tf_max_gap_s": 0.03999999999999204,
+  "tf_gaps_over_50ms": 0,
+  "matching_tf_fraction": 1.0,
+  "tf_pose_matches": true,
+  "frame_errors": 0,
+  "note": "Local estimate only. Official Judge and hidden scenarios were not run."
+}

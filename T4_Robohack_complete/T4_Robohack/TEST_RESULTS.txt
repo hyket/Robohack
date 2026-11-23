@@ -1,0 +1,15 @@
+test_attitude_interpolates_wrap (test_core.TestOdometry.test_attitude_interpolates_wrap) ... ok
+test_degenerate_corridor_is_rejected (test_core.TestOdometry.test_degenerate_corridor_is_rejected) ... ok
+test_invalid_measurements (test_core.TestOdometry.test_invalid_measurements) ... ok
+test_metrics_detect_bad_odometry (test_core.TestOdometry.test_metrics_detect_bad_odometry) ... ok
+test_noisy_square_with_body_tilt_and_drift (test_core.TestOdometry.test_noisy_square_with_body_tilt_and_drift) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 3.770s
+
+OK
+
+Synthetic square: {'segments': 4, 'mean_rpe': 0.001588517399925076, 'segment_rpe': [0.0009100371177422191, 0.002773565292771054, 0.0010706149662597225, 0.0015998522229273085], 'odom_mean_hz': 20.00000000000036, 'odom_max_gap_s': 0.05000000000000071, 'drift_m': 0.0011708639690578902, 'drift_deg': 0.041664724478758026, 'drift_pass': True, 'actual_end_displacement_m': 0.0, 'actual_end_rotation_deg': 0.041664724478758026} accepted 1101 / 1101
+
+ROS 2 Jazzy synthetic contract test: 250 odometry messages, 50.00 Hz sim time; all TF poses and stamps matched.
+Gazebo, Docker build and ROS 2 Humble: NOT VERIFIED.
