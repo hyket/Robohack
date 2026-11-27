@@ -1,0 +1,590 @@
+diff --git a/go1_gym/envs/base/legged_robot.py b/go1_gym/envs/base/legged_robot.py
+index f62ed78..3a1938b 100755
+--- a/go1_gym/envs/base/legged_robot.py
++++ b/go1_gym/envs/base/legged_robot.py
+@@ -921,9 +921,8 @@ class LeggedRobot(BaseTask):
+ 
+         if self.cfg.domain_rand.randomize_lag_timesteps:
+             self.lag_buffer = self.lag_buffer[1:] + [actions_scaled.clone()]
+-            self.joint_pos_target = self.lag_buffer[0] + self.default_dof_pos
+-        else:
+-            self.joint_pos_target = actions_scaled + self.default_dof_pos
++            actions_scaled = self.lag_buffer[0]
++        self._set_joint_pos_target(actions_scaled + self.default_dof_pos)
+ 
+         control_type = self.cfg.control.control_type
+ 
+@@ -945,6 +944,9 @@ class LeggedRobot(BaseTask):
+         torques = torques * self.motor_strengths
+         return torch.clip(torques, -self.torque_limits, self.torque_limits)
+ 
++    def _set_joint_pos_target(self, target):
++        self.joint_pos_target = target
++
+     def _reset_dofs(self, env_ids, cfg):
+         """ Resets DOF position and velocities of selected environmments
+         Positions are randomly selected within 0.5:1.5 x default positions.
+@@ -1707,7 +1709,8 @@ class LeggedRobot(BaseTask):
+             # create a grid of robots
+             num_cols = np.floor(np.sqrt(len(env_ids)))
+             num_rows = np.ceil(self.num_envs / num_cols)
+-            xx, yy = torch.meshgrid(torch.arange(num_rows), torch.arange(num_cols))
++            xx, yy = torch.meshgrid(torch.arange(num_rows, device=self.device),
++                                     torch.arange(num_cols, device=self.device))
+             spacing = cfg.env.env_spacing
+             self.env_origins[env_ids, 0] = spacing * xx.flatten()[:len(env_ids)]
+             self.env_origins[env_ids, 1] = spacing * yy.flatten()[:len(env_ids)]
+diff --git a/go1_gym/envs/go1/t3_forward_env.py b/go1_gym/envs/go1/t3_forward_env.py
+new file mode 100644
+index 0000000..ee03cba
+--- /dev/null
++++ b/go1_gym/envs/go1/t3_forward_env.py
+@@ -0,0 +1,69 @@
++from math import radians
++
++import isaacgym
++assert isaacgym
++import torch
++
++from go1_gym.envs.base.legged_robot import LeggedRobot
++from go1_gym.envs.go1.velocity_tracking import VelocityTrackingEasyEnv
++
++
++class T3ForwardEnv(VelocityTrackingEasyEnv):
++    # Same command and per-joint targets as the Robohack T3 Participant.
++    TROT = (0, 0, 0, 0, 3, 0.5, 0, 0, 0.5, 0.08, 0, 0, 0.33, 0.40, 0)
++    JOINT_LIMITS = {"hip": (-0.863, 0.863), "thigh": (-0.686, 4.501), "calf": (-2.818, -0.888)}
++    TARGET_INTERVAL = 0.010
++    MAX_TARGET_STEP = radians(5.0) - 0.001
++    PASSIVE_DAMPING = {"hip": 1.0, "thigh": 2.0, "calf": 2.0}
++
++    def _init_command_distribution(self, env_ids):
++        # Fixed commands sampled directly on the simulation device.
++        self.env_command_bins = torch.zeros(self.num_train_envs, device=self.device)
++        self.trot_command = torch.tensor(self.TROT, dtype=torch.float32, device=self.device)
++
++    def _resample_commands(self, env_ids):
++        if len(env_ids) == 0:
++            return
++        low, high = self.cfg.commands.lin_vel_x
++        self.commands[env_ids] = self.trot_command
++        self.commands[env_ids, 0] = torch.rand(len(env_ids), device=self.device) * (high - low) + low
++        for values in self.command_sums.values():
++            values[env_ids] = 0
++
++    def _process_dof_props(self, props, env_id):
++        props["damping"][:] = [self.PASSIVE_DAMPING[name.split("_")[1]] for name in self.dof_names]
++        return super()._process_dof_props(props, env_id)
++
++    def _init_buffers(self):
++        super()._init_buffers()
++        # Look up limits by joint name so they follow the Isaac Gym DOF order.
++        limits = [self.JOINT_LIMITS[name.split("_")[1]] for name in self.dof_names]
++        self.target_lower, self.target_upper = torch.tensor(limits, device=self.device).T
++        self.target_ticks = round(self.TARGET_INTERVAL / self.sim_params.dt)
++        if self.target_ticks < 1 or abs(self.target_ticks * self.sim_params.dt - self.TARGET_INTERVAL) > 1e-6:
++            raise ValueError("The physics timestep must evenly divide the 10 ms target interval")
++        if self.cfg.control.decimation % self.target_ticks != 0:
++            raise ValueError("The policy period must be a multiple of the target interval")
++
++    def reset_idx(self, env_ids):
++        super().reset_idx(env_ids)
++        self.joint_pos_target[env_ids] = self.default_dof_pos
++
++    def _set_joint_pos_target(self, target):
++        if self.target_substep % self.target_ticks == 0:
++            valid = torch.isfinite(target).all(dim=1, keepdim=True)
++            target = torch.clamp(target, self.target_lower, self.target_upper)
++            delta = (target - self.joint_pos_target).clamp(-self.MAX_TARGET_STEP, self.MAX_TARGET_STEP)
++            self.joint_pos_target = torch.where(valid, self.joint_pos_target + delta, self.joint_pos_target)
++        self.target_substep += 1
++
++    def step(self, actions):
++        self.target_substep = 0
++        self.extras.pop("train/episode", None)
++        forward_command = self.commands[:, 0].clone()
++        obs, privileged_obs, reward, done, info = LeggedRobot.step(self, actions)
++        # Keep rollout data on the simulation device. The command may have changed in reset_idx.
++        info.update(privileged_obs=privileged_obs, env_bins=self.env_command_bins,
++                    time_outs=self.time_out_buf[:self.num_train_envs],
++                    forward_velocity=self.base_lin_vel[:, 0], forward_command=forward_command)
++        return obs, reward, done, info
+diff --git a/go1_gym_learn/ppo_cse/__init__.py b/go1_gym_learn/ppo_cse/__init__.py
+index f1b0bdd..1b33dff 100755
+--- a/go1_gym_learn/ppo_cse/__init__.py
++++ b/go1_gym_learn/ppo_cse/__init__.py
+@@ -61,11 +61,12 @@ class RunnerArgs(PrefixProto, cli=False):
+ 
+ class Runner:
+ 
+-    def __init__(self, env, device='cpu'):
++    def __init__(self, env, device='cpu', init_weights=None, checkpoint_dir=None):
+         from .ppo import PPO
+ 
+         self.device = device
+         self.env = env
++        self.checkpoint_dir = checkpoint_dir
+ 
+         actor_critic = ActorCritic(self.env.num_obs,
+                                       self.env.num_privileged_obs,
+@@ -73,7 +74,10 @@ class Runner:
+                                       self.env.num_actions,
+                                       ).to(self.device)
+ 
+-        if RunnerArgs.resume:
++        if init_weights is not None:
++            weights = torch.load(init_weights, map_location="cpu")
++            actor_critic.load_state_dict(weights)
++        elif RunnerArgs.resume:
+             # load pretrained weights from resume_path
+             from ml_logger import ML_Logger
+             loader = ML_Logger(root="http://escher.csail.mit.edu:8080",
+@@ -104,7 +108,8 @@ class Runner:
+ 
+         self.env.reset()
+ 
+-    def learn(self, num_learning_iterations, init_at_random_ep_len=False, eval_freq=100, curriculum_dump_freq=500, eval_expert=False):
++    def learn(self, num_learning_iterations, init_at_random_ep_len=False, eval_freq=100,
++              curriculum_dump_freq=500, eval_expert=False, iteration_callback=None):
+         from ml_logger import logger
+         # initialize writer
+         assert logger.prefix, "you will overwrite the entire instrument server"
+@@ -112,8 +117,7 @@ class Runner:
+         logger.start('start', 'epoch', 'episode', 'run', 'step')
+ 
+         if init_at_random_ep_len:
+-            self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf,
+-                                                             high=int(self.env.max_episode_length))
++            self.env.episode_length_buf.random_(int(self.env.max_episode_length))
+ 
+         # split train and test envs
+         num_train_envs = self.env.num_train_envs
+@@ -131,9 +135,17 @@ class Runner:
+         cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+         cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
+ 
++        rollout_stats = None
++        cuda_timing = iteration_callback is not None and torch.device(self.device).type == "cuda"
++        if iteration_callback is not None:
++            # Record rewards, measured forward speed and commanded speed on-device.
++            rollout_stats = torch.empty((3, self.num_steps_per_env, num_train_envs), device=self.device)
++
+         tot_iter = self.current_learning_iteration + num_learning_iterations
++        learn_start = time.perf_counter()
+         for it in range(self.current_learning_iteration, tot_iter):
+-            start = time.time()
++            start = time.perf_counter()
++            velocity_samples = 0
+             # Rollout
+             with torch.inference_mode():
+                 for i in range(self.num_steps_per_env):
+@@ -153,6 +165,13 @@ class Runner:
+                         self.device), obs_history.to(self.device), rewards.to(self.device), dones.to(self.device)
+                     self.alg.process_env_step(rewards[:num_train_envs], dones[:num_train_envs], infos)
+ 
++                    if rollout_stats is not None:
++                        rollout_stats[0, i].copy_(rewards[:num_train_envs])
++                        if "forward_velocity" in infos and "forward_command" in infos:
++                            rollout_stats[1, velocity_samples].copy_(infos["forward_velocity"][:num_train_envs])
++                            rollout_stats[2, velocity_samples].copy_(infos["forward_command"][:num_train_envs])
++                            velocity_samples += 1
++
+                     if 'train/episode' in infos:
+                         with logger.Prefix(metrics="train/episode"):
+                             logger.store_metrics(**infos['train/episode'])
+@@ -183,11 +202,9 @@ class Runner:
+                     if 'curriculum/distribution' in infos:
+                         distribution = infos['curriculum/distribution']
+ 
+-                stop = time.time()
+-                collection_time = stop - start
+-
+-                # Learning step
+-                start = stop
++                if cuda_timing:
++                    torch.cuda.synchronize(self.device)
++                rollout_end = time.perf_counter()
+                 self.alg.compute_returns(obs_history[:num_train_envs], privileged_obs[:num_train_envs])
+ 
+                 if it % curriculum_dump_freq == 0:
+@@ -202,11 +219,11 @@ class Runner:
+                                          path=f"curriculum/distribution.pkl", append=True)
+ 
+             mean_value_loss, mean_surrogate_loss, mean_adaptation_module_loss, mean_decoder_loss, mean_decoder_loss_student, mean_adaptation_module_test_loss, mean_decoder_test_loss, mean_decoder_test_loss_student = self.alg.update()
+-            stop = time.time()
+-            learn_time = stop - start
++            if cuda_timing:
++                torch.cuda.synchronize(self.device)
++            update_end = time.perf_counter()
+ 
+             logger.store_metrics(
+-                # total_time=learn_time - collection_time,
+                 time_elapsed=logger.since('start'),
+                 time_iter=logger.split('epoch'),
+                 adaptation_loss=mean_adaptation_module_loss,
+@@ -222,57 +239,67 @@ class Runner:
+             if RunnerArgs.save_video_interval:
+                 self.log_video(it)
+ 
+-            self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
+-            if logger.every(RunnerArgs.log_freq, "iteration", start_on=1):
+-                # if it % Config.log_freq == 0:
++            env_steps = self.num_steps_per_env * self.env.num_envs
++            self.tot_timesteps += env_steps
++            if iteration_callback is not None:
++                iteration_seconds = update_end - start
++                means = {"reward_mean": rollout_stats[0].mean()}
++                if velocity_samples:
++                    velocities = rollout_stats[1, :velocity_samples]
++                    commands = rollout_stats[2, :velocity_samples]
++                    means.update(forward_velocity_mps=velocities.mean(),
++                                 commanded_forward_velocity_mps=commands.mean(),
++                                 forward_velocity_rmse_mps=(velocities - commands).square().mean().sqrt())
++                # Transfer aggregate values together, once per iteration.
++                stats = dict(zip(means, torch.stack(tuple(means.values())).tolist()))
++                iteration_callback(dict(iteration=it + 1, elapsed_seconds=update_end - learn_start,
++                                        iteration_seconds=iteration_seconds, collection_seconds=rollout_end - start,
++                                        update_seconds=update_end - rollout_end, env_steps_total=self.tot_timesteps,
++                                        env_steps_per_second=env_steps / iteration_seconds,
++                                        policy_learning_rate=self.alg.optimizer.param_groups[0]["lr"],
++                                        value_loss=mean_value_loss, surrogate_loss=mean_surrogate_loss,
++                                        adaptation_loss=mean_adaptation_module_loss,
++                                        adaptation_test_loss=mean_adaptation_module_test_loss, **stats))
++            if logger.every(RunnerArgs.log_freq, "iteration", start_on=1) or it == tot_iter - 1:
+                 logger.log_metrics_summary(key_values={"timesteps": self.tot_timesteps, "iterations": it})
+                 logger.job_running()
+ 
+-            if it % RunnerArgs.save_interval == 0:
+-                with logger.Sync():
+-                    logger.torch_save(self.alg.actor_critic.state_dict(), f"checkpoints/ac_weights_{it:06d}.pt")
+-                    logger.duplicate(f"checkpoints/ac_weights_{it:06d}.pt", f"checkpoints/ac_weights_last.pt")
+-
+-                    path = './tmp/legged_data'
+-
+-                    os.makedirs(path, exist_ok=True)
+-
+-                    adaptation_module_path = f'{path}/adaptation_module_latest.jit'
+-                    adaptation_module = copy.deepcopy(self.alg.actor_critic.adaptation_module).to('cpu')
+-                    traced_script_adaptation_module = torch.jit.script(adaptation_module)
+-                    traced_script_adaptation_module.save(adaptation_module_path)
+-
+-                    body_path = f'{path}/body_latest.jit'
+-                    body_model = copy.deepcopy(self.alg.actor_critic.actor_body).to('cpu')
+-                    traced_script_body_module = torch.jit.script(body_model)
+-                    traced_script_body_module.save(body_path)
+-
+-                    logger.upload_file(file_path=adaptation_module_path, target_path=f"checkpoints/", once=False)
+-                    logger.upload_file(file_path=body_path, target_path=f"checkpoints/", once=False)
+-
+-            self.current_learning_iteration += num_learning_iterations
++            if it % RunnerArgs.save_interval == 0 or it == tot_iter - 1:
++                self._save_checkpoint(it)
++            self.current_learning_iteration = it + 1
++
++    def _save_checkpoint(self, iteration):
++        actor_critic = self.alg.actor_critic
++        filename = f"ac_weights_{iteration:06d}.pt"
++        if self.checkpoint_dir is not None:
++            from shutil import copyfile
++
++            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
++            torch.save(actor_critic.state_dict(), self.checkpoint_dir / filename)
++            for name, module in (("adaptation_module", actor_critic.adaptation_module),
++                                 ("body", actor_critic.actor_body)):
++                scripted = torch.jit.script(copy.deepcopy(module).eval().cpu())
++                target = self.checkpoint_dir / f"{name}_latest.jit"
++                staging = target.with_suffix(".tmp")
++                scripted.save(str(staging))
++                staging.replace(target)
++            latest = self.checkpoint_dir / "ac_weights_last.pt"
++            staging = latest.with_suffix(".tmp")
++            copyfile(self.checkpoint_dir / filename, staging)
++            staging.replace(latest)
++            return
+ 
+         with logger.Sync():
+-            logger.torch_save(self.alg.actor_critic.state_dict(), f"checkpoints/ac_weights_{it:06d}.pt")
+-            logger.duplicate(f"checkpoints/ac_weights_{it:06d}.pt", f"checkpoints/ac_weights_last.pt")
+-
+-            path = './tmp/legged_data'
+-
++            logger.torch_save(actor_critic.state_dict(), f"checkpoints/{filename}")
++            logger.duplicate(f"checkpoints/{filename}", "checkpoints/ac_weights_last.pt")
++            path = "./tmp/legged_data"
+             os.makedirs(path, exist_ok=True)
+-
+-            adaptation_module_path = f'{path}/adaptation_module_latest.jit'
+-            adaptation_module = copy.deepcopy(self.alg.actor_critic.adaptation_module).to('cpu')
+-            traced_script_adaptation_module = torch.jit.script(adaptation_module)
+-            traced_script_adaptation_module.save(adaptation_module_path)
+-
+-            body_path = f'{path}/body_latest.jit'
+-            body_model = copy.deepcopy(self.alg.actor_critic.actor_body).to('cpu')
+-            traced_script_body_module = torch.jit.script(body_model)
+-            traced_script_body_module.save(body_path)
+-
+-            logger.upload_file(file_path=adaptation_module_path, target_path=f"checkpoints/", once=False)
+-            logger.upload_file(file_path=body_path, target_path=f"checkpoints/", once=False)
+-
++            for name, module in (("adaptation_module", actor_critic.adaptation_module),
++                                 ("body", actor_critic.actor_body)):
++                scripted = torch.jit.script(copy.deepcopy(module).eval().cpu())
++                export_path = f"{path}/{name}_latest.jit"
++                scripted.save(export_path)
++                logger.upload_file(file_path=export_path, target_path="checkpoints/", once=False)
+ 
+     def log_video(self, it):
+         if it - self.last_recording_it >= RunnerArgs.save_video_interval:
+diff --git a/scripts/train.py b/scripts/train.py
+index d6aa3d2..7c02836 100755
+--- a/scripts/train.py
++++ b/scripts/train.py
+@@ -1,12 +1,37 @@
+-def train_go1(headless=True):
++import json
++import os
++import random
++from contextlib import ExitStack
++from math import isfinite
++from pathlib import Path
++
++
++def train_go1():
++    run_dir = Path(os.environ["WTW_RUN_DIR"])
++    weights = Path(os.environ["WTW_INIT_WEIGHTS"]).expanduser().resolve(strict=True)
++    num_envs = int(os.environ.get("WTW_NUM_ENVS", "1024"))
++    iterations = int(os.environ.get("WTW_ITERATIONS", "400"))
++    seed = int(os.environ.get("WTW_SEED", "42"))
++    learning_rate = float(os.environ.get("WTW_LEARNING_RATE", "0.0001"))
++    use_wandb = os.environ.get("WTW_WANDB") == "1"
++    if not isfinite(learning_rate) or learning_rate <= 0:
++        raise ValueError("WTW_LEARNING_RATE must be finite and positive")
++    if not run_dir.is_absolute() or not run_dir.name:
++        raise ValueError("WTW_RUN_DIR must be an absolute run directory")
++    if not weights.is_file() or num_envs < 1 or iterations < 1 or not 0 <= seed < 2**32:
++        raise ValueError("Expected a checkpoint file, positive environment and iteration counts, and a 32-bit seed")
++    run_dir.mkdir(parents=True, exist_ok=True)
++    if (run_dir / "parameters.pkl").exists() or (run_dir / "checkpoints").exists():
++        raise FileExistsError(f"Choose a fresh WTW_RUN_DIR: {run_dir}")
+ 
+     import isaacgym
+     assert isaacgym
++    import numpy as np
+     import torch
+ 
+     from go1_gym.envs.base.legged_robot_config import Cfg
+     from go1_gym.envs.go1.go1_config import config_go1
+-    from go1_gym.envs.go1.velocity_tracking import VelocityTrackingEasyEnv
++    from go1_gym.envs.go1.t3_forward_env import T3ForwardEnv
+ 
+     from ml_logger import logger
+ 
+@@ -18,18 +43,20 @@ def train_go1(headless=True):
+ 
+     config_go1(Cfg)
+ 
+-    Cfg.commands.num_lin_vel_bins = 30
+-    Cfg.commands.num_ang_vel_bins = 30
+-    Cfg.curriculum_thresholds.tracking_ang_vel = 0.7
+-    Cfg.curriculum_thresholds.tracking_lin_vel = 0.8
+-    Cfg.curriculum_thresholds.tracking_contacts_shaped_vel = 0.90
+-    Cfg.curriculum_thresholds.tracking_contacts_shaped_force = 0.90
+-
+-    Cfg.commands.distributional_commands = True
+-
+-    Cfg.domain_rand.lag_timesteps = 6
+-    Cfg.domain_rand.randomize_lag_timesteps = True
+-    Cfg.control.control_type = "actuator_net"
++    if not torch.cuda.is_available():
++        raise RuntimeError("CUDA is required for Isaac Gym T3 training")
++    device = "cuda:0"
++    random.seed(seed)
++    np.random.seed(seed)
++    torch.manual_seed(seed)
++
++    Cfg.env.num_envs = num_envs
++    Cfg.env.record_video = False
++    Cfg.domain_rand.lag_timesteps = 0
++    Cfg.domain_rand.randomize_lag_timesteps = False
++    Cfg.control.control_type = "P"
++    Cfg.control.stiffness = {"joint": 40.0}
++    Cfg.control.damping = {"joint": 0.5}
+ 
+     Cfg.domain_rand.randomize_rigids_after_start = False
+     Cfg.env.priv_observe_motion = False
+@@ -89,23 +116,8 @@ def train_go1(headless=True):
+     Cfg.env.observe_timing_parameter = False
+     Cfg.env.observe_clock_inputs = True
+ 
+-    Cfg.domain_rand.tile_height_range = [-0.0, 0.0]
+-    Cfg.domain_rand.tile_height_curriculum = False
+-    Cfg.domain_rand.tile_height_update_interval = 1000000
+-    Cfg.domain_rand.tile_height_curriculum_step = 0.01
+-    Cfg.terrain.border_size = 0.0
+-    Cfg.terrain.mesh_type = "trimesh"
+-    Cfg.terrain.num_cols = 30
+-    Cfg.terrain.num_rows = 30
+-    Cfg.terrain.terrain_width = 5.0
+-    Cfg.terrain.terrain_length = 5.0
+-    Cfg.terrain.x_init_range = 0.2
+-    Cfg.terrain.y_init_range = 0.2
+-    Cfg.terrain.teleport_thresh = 0.3
++    Cfg.terrain.mesh_type = "plane"
+     Cfg.terrain.teleport_robots = False
+-    Cfg.terrain.center_robots = True
+-    Cfg.terrain.center_span = 4
+-    Cfg.terrain.horizontal_scale = 0.10
+     Cfg.rewards.use_terminal_foot_height = False
+     Cfg.rewards.use_terminal_body_height = True
+     Cfg.rewards.terminal_body_height = 0.05
+@@ -148,109 +160,53 @@ def train_go1(headless=True):
+     Cfg.rewards.only_positive_rewards_ji22_style = True
+     Cfg.rewards.sigma_rew_neg = 0.02
+ 
+-
+-
+-    Cfg.commands.lin_vel_x = [-1.0, 1.0]
+-    Cfg.commands.lin_vel_y = [-0.6, 0.6]
+-    Cfg.commands.ang_vel_yaw = [-1.0, 1.0]
+-    Cfg.commands.body_height_cmd = [-0.25, 0.15]
+-    Cfg.commands.gait_frequency_cmd_range = [2.0, 4.0]
+-    Cfg.commands.gait_phase_cmd_range = [0.0, 1.0]
+-    Cfg.commands.gait_offset_cmd_range = [0.0, 1.0]
+-    Cfg.commands.gait_bound_cmd_range = [0.0, 1.0]
+-    Cfg.commands.gait_duration_cmd_range = [0.5, 0.5]
+-    Cfg.commands.footswing_height_range = [0.03, 0.35]
+-    Cfg.commands.body_pitch_range = [-0.4, 0.4]
+-    Cfg.commands.body_roll_range = [-0.0, 0.0]
+-    Cfg.commands.stance_width_range = [0.10, 0.45]
+-    Cfg.commands.stance_length_range = [0.35, 0.45]
+-
+-    Cfg.commands.limit_vel_x = [-5.0, 5.0]
+-    Cfg.commands.limit_vel_y = [-0.6, 0.6]
+-    Cfg.commands.limit_vel_yaw = [-5.0, 5.0]
+-    Cfg.commands.limit_body_height = [-0.25, 0.15]
+-    Cfg.commands.limit_gait_frequency = [2.0, 4.0]
+-    Cfg.commands.limit_gait_phase = [0.0, 1.0]
+-    Cfg.commands.limit_gait_offset = [0.0, 1.0]
+-    Cfg.commands.limit_gait_bound = [0.0, 1.0]
+-    Cfg.commands.limit_gait_duration = [0.5, 0.5]
+-    Cfg.commands.limit_footswing_height = [0.03, 0.35]
+-    Cfg.commands.limit_body_pitch = [-0.4, 0.4]
+-    Cfg.commands.limit_body_roll = [-0.0, 0.0]
+-    Cfg.commands.limit_stance_width = [0.10, 0.45]
+-    Cfg.commands.limit_stance_length = [0.35, 0.45]
+-
+-    Cfg.commands.num_bins_vel_x = 21
+-    Cfg.commands.num_bins_vel_y = 1
+-    Cfg.commands.num_bins_vel_yaw = 21
+-    Cfg.commands.num_bins_body_height = 1
+-    Cfg.commands.num_bins_gait_frequency = 1
+-    Cfg.commands.num_bins_gait_phase = 1
+-    Cfg.commands.num_bins_gait_offset = 1
+-    Cfg.commands.num_bins_gait_bound = 1
+-    Cfg.commands.num_bins_gait_duration = 1
+-    Cfg.commands.num_bins_footswing_height = 1
+-    Cfg.commands.num_bins_body_roll = 1
+-    Cfg.commands.num_bins_body_pitch = 1
+-    Cfg.commands.num_bins_stance_width = 1
+-
++    Cfg.commands.command_curriculum = False
++    Cfg.commands.lin_vel_x = [0.1, 0.6]
++    Cfg.commands.lin_vel_y = [0.0, 0.0]
++    Cfg.commands.ang_vel_yaw = [0.0, 0.0]
+     Cfg.normalization.friction_range = [0, 1]
+-    Cfg.normalization.ground_friction_range = [0, 1]
+-    Cfg.terrain.yaw_init_range = 3.14
+     Cfg.normalization.clip_actions = 10.0
+ 
+-    Cfg.commands.exclusive_phase_offset = False
+-    Cfg.commands.pacing_offset = False
+-    Cfg.commands.binary_phases = True
+-    Cfg.commands.gaitwise_curricula = True
+-
+-    env = VelocityTrackingEasyEnv(sim_device='cuda:0', headless=False, cfg=Cfg)
+-
+-    # log the experiment parameters
++    # Use small updates to keep the initial walking policy while adapting to PD.
++    PPO_Args.learning_rate = learning_rate
++    PPO_Args.adaptation_module_learning_rate = 1e-4
++    PPO_Args.schedule = "fixed"
++    RunnerArgs.save_video_interval = 0
++    RunnerArgs.save_interval = 100
++
++    gpu = torch.cuda.get_device_name(0)
++    training = dict(seed=seed, num_envs=num_envs, iterations=iterations, init_weights=str(weights),
++                    policy_learning_rate=learning_rate, adaptation_learning_rate=PPO_Args.adaptation_module_learning_rate,
++                    ppo_epochs=PPO_Args.num_learning_epochs, mini_batches=PPO_Args.num_mini_batches,
++                    rollout_steps=RunnerArgs.num_steps_per_env, trot=T3ForwardEnv.TROT,
++                    commanded_forward_velocity_range=Cfg.commands.lin_vel_x, gpu=gpu, wandb_offline=use_wandb)
++    logger.configure(prefix=run_dir.name, root=str(run_dir.parent))
++    print(f"T3 fine-tuning on {gpu}: {num_envs} envs, {iterations} iterations, seed {seed}, "
++          f"policy LR {learning_rate:g}, {PPO_Args.num_learning_epochs} PPO epochs", flush=True)
++    env = T3ForwardEnv(sim_device=device, headless=True, cfg=Cfg)
+     logger.log_params(AC_Args=vars(AC_Args), PPO_Args=vars(PPO_Args), RunnerArgs=vars(RunnerArgs),
+-                      Cfg=vars(Cfg))
++                      Cfg=vars(Cfg), training=training)
+ 
+-    env = HistoryWrapper(env)
+-    gpu_id = 0
+-    runner = Runner(env, device=f"cuda:{gpu_id}")
+-    runner.learn(num_learning_iterations=100000, init_at_random_ep_len=True, eval_freq=100)
++    with ExitStack() as stack:
++        metrics_file = stack.enter_context((run_dir / "metrics.jsonl").open("x", encoding="utf-8", buffering=1))
++        wandb_run = None
++        if use_wandb:
++            import wandb
+ 
++            wandb_run = stack.enter_context(wandb.init(project="robohack-t3", name=run_dir.name,
++                                                       dir=str(run_dir), mode="offline", config=training))
+ 
+-if __name__ == '__main__':
+-    from pathlib import Path
+-    from ml_logger import logger
+-    from go1_gym import MINI_GYM_ROOT_DIR
++        def report_iteration(metrics):
++            metrics_file.write(json.dumps(metrics, allow_nan=False) + "\n")
++            print(f"PPO {metrics['iteration']}/{iterations} | {metrics['iteration_seconds']:.2f}s/iter | "
++                  f"{metrics['env_steps_per_second']:.0f} env steps/s | reward {metrics['reward_mean']:.3f} | "
++                  f"forward RMSE {metrics['forward_velocity_rmse_mps']:.3f} m/s", flush=True)
++            if wandb_run is not None:
++                wandb_run.log(metrics, step=metrics["iteration"])
++
++        runner = Runner(HistoryWrapper(env), device=device, init_weights=weights, checkpoint_dir=run_dir / "checkpoints")
++        runner.learn(num_learning_iterations=iterations, init_at_random_ep_len=True, iteration_callback=report_iteration)
+ 
+-    stem = Path(__file__).stem
+-    logger.configure(logger.utcnow(f'gait-conditioned-agility/%Y-%m-%d/{stem}/%H%M%S.%f'),
+-                     root=Path(f"{MINI_GYM_ROOT_DIR}/runs").resolve(), )
+-    logger.log_text("""
+-                charts: 
+-                - yKey: train/episode/rew_total/mean
+-                  xKey: iterations
+-                - yKey: train/episode/rew_tracking_lin_vel/mean
+-                  xKey: iterations
+-                - yKey: train/episode/rew_tracking_contacts_shaped_force/mean
+-                  xKey: iterations
+-                - yKey: train/episode/rew_action_smoothness_1/mean
+-                  xKey: iterations
+-                - yKey: train/episode/rew_action_smoothness_2/mean
+-                  xKey: iterations
+-                - yKey: train/episode/rew_tracking_contacts_shaped_vel/mean
+-                  xKey: iterations
+-                - yKey: train/episode/rew_orientation_control/mean
+-                  xKey: iterations
+-                - yKey: train/episode/rew_dof_pos/mean
+-                  xKey: iterations
+-                - yKey: train/episode/command_area_trot/mean
+-                  xKey: iterations
+-                - yKey: train/episode/max_terrain_height/mean
+-                  xKey: iterations
+-                - type: video
+-                  glob: "videos/*.mp4"
+-                - yKey: adaptation_loss/mean
+-                  xKey: iterations
+-                """, filename=".charts.yml", dedent=True)
+ 
+-    # to see the environment rendering, set headless=False
+-    train_go1(headless=False)
++if __name__ == "__main__":
++    train_go1()

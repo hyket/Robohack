@@ -1,0 +1,267 @@
+{
+  "environment": {
+    "host": "macOS arm64",
+    "vm": "Lima robohack, Linux aarch64",
+    "container_platform": "linux/amd64",
+    "simulator_image": "robohack-t2-sim-source:local",
+    "simulator_id": "sha256:b075d42000a3ba6130cda083b7501c60b71882a6b6312cf8ca6e10c8c4c476c0",
+    "participant_image": "go1-participant:t3",
+    "participant_id": "sha256:d8bdb369ee1e470881673f0409ae46edb58b6f708e10c1a9041f0a2796c0a575"
+  },
+  "configuration": {
+    "policy": "Walk These Ways",
+    "kp": 40.0,
+    "kd": 0.5,
+    "self_trained_rl": false,
+    "warmup_sim_s": 1.5,
+    "scored_time_limit_sim_s": 35.0,
+    "distance_target_m": 3.0,
+    "sequence_mps": [
+      0.6,
+      0.5,
+      0.4
+    ],
+    "repetitions": "Two per speed; a third was run when both succeeded.",
+    "fresh_simulator_and_participant_per_episode": true,
+    "position_source": "/odom/ground_truth",
+    "command_timing_source": "/clock"
+  },
+  "timing": {
+    "full_sweep_wall_s_on_mac": 149.35,
+    "episode_wall_scope": "Fresh container pair startup, evaluation and cleanup in the running Lima VM.",
+    "scored_time_scope": "Simulator time after 1.5 seconds of warm-up, up to the successful endpoint or stop."
+  },
+  "results": [
+    {
+      "speed_mps": 0.4,
+      "episodes": 3,
+      "successes": 3,
+      "falls": 0,
+      "timeouts": 0,
+      "median_success_scored_sim_s": 11.378000001,
+      "median_episode_wall_s": 18.19,
+      "observed_episodes": [
+        {
+          "round": 1,
+          "wall_s": 17.65,
+          "status": "success",
+          "speed_mps": 0.4,
+          "forward_m": 3.0009028472687156,
+          "elapsed_sim_s": 12.520000001,
+          "scored_sim_s": 11.020000001,
+          "fall_condition": null,
+          "commands": {
+            "/lowcmd_bare": {
+              "messages": 1181,
+              "mean_hz": 94.32907347489385,
+              "max_gap_s": 0.012000000000000455
+            },
+            "/lowcmd": {
+              "messages": 1182,
+              "mean_hz": 94.40894567936031,
+              "max_gap_s": 0.012000000000000455
+            }
+          }
+        },
+        {
+          "round": 2,
+          "wall_s": 18.22,
+          "status": "success",
+          "speed_mps": 0.4,
+          "forward_m": 3.0005676032585478,
+          "elapsed_sim_s": 12.878000001,
+          "scored_sim_s": 11.378000001,
+          "fall_condition": null,
+          "commands": {
+            "/lowcmd_bare": {
+              "messages": 1217,
+              "mean_hz": 94.50225189513105,
+              "max_gap_s": 0.014000000000000234
+            },
+            "/lowcmd": {
+              "messages": 1222,
+              "mean_hz": 94.89051094153669,
+              "max_gap_s": 0.014000000000000234
+            }
+          }
+        },
+        {
+          "round": 3,
+          "wall_s": 18.19,
+          "status": "success",
+          "speed_mps": 0.4,
+          "forward_m": 3.001477298992007,
+          "elapsed_sim_s": 12.912000001,
+          "scored_sim_s": 11.412000001,
+          "fall_condition": null,
+          "commands": {
+            "/lowcmd_bare": {
+              "messages": 1225,
+              "mean_hz": 94.87298636192125,
+              "max_gap_s": 0.014000000000000234
+            },
+            "/lowcmd": {
+              "messages": 1231,
+              "mean_hz": 95.33767037675514,
+              "max_gap_s": 0.014000000000000234
+            }
+          }
+        }
+      ]
+    },
+    {
+      "speed_mps": 0.5,
+      "episodes": 3,
+      "successes": 3,
+      "falls": 0,
+      "timeouts": 0,
+      "median_success_scored_sim_s": 9.544000001,
+      "median_episode_wall_s": 16.11,
+      "observed_episodes": [
+        {
+          "round": 1,
+          "wall_s": 16.62,
+          "status": "success",
+          "speed_mps": 0.5,
+          "forward_m": 3.0026912529708225,
+          "elapsed_sim_s": 11.160000001,
+          "scored_sim_s": 9.660000001,
+          "fall_condition": null,
+          "commands": {
+            "/lowcmd_bare": {
+              "messages": 1057,
+              "mean_hz": 94.71326164025866,
+              "max_gap_s": 0.012000000000000455
+            },
+            "/lowcmd": {
+              "messages": 1058,
+              "mean_hz": 94.80286737501767,
+              "max_gap_s": 0.012000000000000455
+            }
+          }
+        },
+        {
+          "round": 2,
+          "wall_s": 16.11,
+          "status": "success",
+          "speed_mps": 0.5,
+          "forward_m": 3.0007522785185903,
+          "elapsed_sim_s": 10.654000001,
+          "scored_sim_s": 9.154000001,
+          "fall_condition": null,
+          "commands": {
+            "/lowcmd_bare": {
+              "messages": 1007,
+              "mean_hz": 94.51849069884376,
+              "max_gap_s": 0.012000001000000537
+            },
+            "/lowcmd": {
+              "messages": 1012,
+              "mean_hz": 94.98779800122135,
+              "max_gap_s": 0.012000001000000537
+            }
+          }
+        },
+        {
+          "round": 3,
+          "wall_s": 16.08,
+          "status": "success",
+          "speed_mps": 0.5,
+          "forward_m": 3.0018532961534876,
+          "elapsed_sim_s": 11.044000001,
+          "scored_sim_s": 9.544000001,
+          "fall_condition": null,
+          "commands": {
+            "/lowcmd_bare": {
+              "messages": 1044,
+              "mean_hz": 94.53096703236771,
+              "max_gap_s": 0.013999999999999346
+            },
+            "/lowcmd": {
+              "messages": 1049,
+              "mean_hz": 94.98370154880625,
+              "max_gap_s": 0.013999999999999346
+            }
+          }
+        }
+      ]
+    },
+    {
+      "speed_mps": 0.6,
+      "episodes": 3,
+      "successes": 3,
+      "falls": 0,
+      "timeouts": 0,
+      "median_success_scored_sim_s": 8.508000001,
+      "median_episode_wall_s": 15.41,
+      "observed_episodes": [
+        {
+          "round": 1,
+          "wall_s": 15.51,
+          "status": "success",
+          "speed_mps": 0.6,
+          "forward_m": 3.000290548679562,
+          "elapsed_sim_s": 9.566000000999999,
+          "scored_sim_s": 8.066000000999999,
+          "fall_condition": null,
+          "commands": {
+            "/lowcmd_bare": {
+              "messages": 904,
+              "mean_hz": 94.50135896984096,
+              "max_gap_s": 0.012000000000000455
+            },
+            "/lowcmd": {
+              "messages": 910,
+              "mean_hz": 95.12858037893284,
+              "max_gap_s": 0.012000000000000455
+            }
+          }
+        },
+        {
+          "round": 2,
+          "wall_s": 15.41,
+          "status": "success",
+          "speed_mps": 0.6,
+          "forward_m": 3.002233564198147,
+          "elapsed_sim_s": 10.250000001,
+          "scored_sim_s": 8.750000001,
+          "fall_condition": null,
+          "commands": {
+            "/lowcmd_bare": {
+              "messages": 970,
+              "mean_hz": 94.63414633223081,
+              "max_gap_s": 0.014000000000000234
+            },
+            "/lowcmd": {
+              "messages": 976,
+              "mean_hz": 95.21951218583224,
+              "max_gap_s": 0.014000000000000234
+            }
+          }
+        },
+        {
+          "round": 3,
+          "wall_s": 15.39,
+          "status": "success",
+          "speed_mps": 0.6,
+          "forward_m": 3.0028835449390794,
+          "elapsed_sim_s": 10.008000001,
+          "scored_sim_s": 8.508000001,
+          "fall_condition": null,
+          "commands": {
+            "/lowcmd_bare": {
+              "messages": 945,
+              "mean_hz": 94.42446042221978,
+              "max_gap_s": 0.012000001000000537
+            },
+            "/lowcmd": {
+              "messages": 950,
+              "mean_hz": 94.92406074191408,
+              "max_gap_s": 0.012000001000000537
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

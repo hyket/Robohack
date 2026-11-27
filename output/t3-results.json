@@ -1,0 +1,258 @@
+{
+  "simulator": {
+    "type": "public MuJoCo Lowlevel",
+    "source_revision": "3473f086fd8a111592b4b9d822500c79f20c811a",
+    "image": "robohack-t2-sim-source:local",
+    "image_id": "sha256:b075d42000a3ba6130cda083b7501c60b71882a6b6312cf8ca6e10c8c4c476c0"
+  },
+  "participant": {
+    "image": "go1-participant:t3",
+    "image_id": "sha256:d8bdb369ee1e470881673f0409ae46edb58b6f708e10c1a9041f0a2796c0a575",
+    "policy": "Walk These Ways",
+    "self_trained_rl": false
+  },
+  "test": {
+    "speed_mps": 0.6,
+    "warmup_s": 1.5,
+    "distance_target_m": 3.0,
+    "scored_time_limit_s": 90.0,
+    "position_source": "/odom/ground_truth",
+    "command_timing_source": "/clock",
+    "fresh_containers_every_episode": true
+  },
+  "series": {
+    "episodes": 10,
+    "successful": 10,
+    "falls": 0,
+    "timeouts": 0,
+    "min_success_scored_sim_s": 7.998000001000001,
+    "max_success_scored_sim_s": 9.342000001,
+    "min_lowcmd_mean_hz": 94.79780531448914,
+    "max_lowcmd_gap_s": 0.02400000000000091
+  },
+  "video": {
+    "file": "robohack-t3-walk-these-ways.mp4",
+    "episode": 1,
+    "pose_sources": [
+      "/odom/ground_truth",
+      "/lowstate"
+    ],
+    "size_px": [
+      960,
+      540
+    ],
+    "fps": 30
+  },
+  "episodes": [
+    {
+      "episode": 1,
+      "status": "success",
+      "speed_mps": 0.6,
+      "forward_m": 3.002282749019038,
+      "elapsed_sim_s": 9.784000001,
+      "scored_sim_s": 8.284000001,
+      "fall_condition": null,
+      "commands": {
+        "/lowcmd_bare": {
+          "messages": 925,
+          "mean_hz": 94.54210955697647,
+          "max_gap_s": 0.02200000000000024
+        },
+        "/lowcmd": {
+          "messages": 931,
+          "mean_hz": 95.15535567302173,
+          "max_gap_s": 0.02200000000000024
+        }
+      }
+    },
+    {
+      "episode": 2,
+      "status": "success",
+      "speed_mps": 0.6,
+      "forward_m": 3.001315750600195,
+      "elapsed_sim_s": 9.764000001,
+      "scored_sim_s": 8.264000001,
+      "fall_condition": null,
+      "commands": {
+        "/lowcmd_bare": {
+          "messages": 923,
+          "mean_hz": 94.53092993706157,
+          "max_gap_s": 0.012000000000000455
+        },
+        "/lowcmd": {
+          "messages": 928,
+          "mean_hz": 95.04301514798823,
+          "max_gap_s": 0.012000000000000455
+        }
+      }
+    },
+    {
+      "episode": 3,
+      "status": "success",
+      "speed_mps": 0.6,
+      "forward_m": 3.002708926041172,
+      "elapsed_sim_s": 9.898000001,
+      "scored_sim_s": 8.398000001,
+      "fall_condition": null,
+      "commands": {
+        "/lowcmd_bare": {
+          "messages": 938,
+          "mean_hz": 94.76661950952045,
+          "max_gap_s": 0.013999999999999346
+        },
+        "/lowcmd": {
+          "messages": 939,
+          "mean_hz": 94.86765002072462,
+          "max_gap_s": 0.013999999999999346
+        }
+      }
+    },
+    {
+      "episode": 4,
+      "status": "success",
+      "speed_mps": 0.6,
+      "forward_m": 3.0035432407427782,
+      "elapsed_sim_s": 9.842000001,
+      "scored_sim_s": 8.342000001,
+      "fall_condition": null,
+      "commands": {
+        "/lowcmd_bare": {
+          "messages": 932,
+          "mean_hz": 94.69619994973621,
+          "max_gap_s": 0.012000000000000455
+        },
+        "/lowcmd": {
+          "messages": 933,
+          "mean_hz": 94.79780531448914,
+          "max_gap_s": 0.012000000000000455
+        }
+      }
+    },
+    {
+      "episode": 5,
+      "status": "success",
+      "speed_mps": 0.6,
+      "forward_m": 3.003801244345738,
+      "elapsed_sim_s": 9.754000001,
+      "scored_sim_s": 8.254000001,
+      "fall_condition": null,
+      "commands": {
+        "/lowcmd_bare": {
+          "messages": 923,
+          "mean_hz": 94.62784497697069,
+          "max_gap_s": 0.012000000000000455
+        },
+        "/lowcmd": {
+          "messages": 928,
+          "mean_hz": 95.14045518811355,
+          "max_gap_s": 0.012000000000000455
+        }
+      }
+    },
+    {
+      "episode": 6,
+      "status": "success",
+      "speed_mps": 0.6,
+      "forward_m": 3.0019052726894477,
+      "elapsed_sim_s": 9.498000001000001,
+      "scored_sim_s": 7.998000001000001,
+      "fall_condition": null,
+      "commands": {
+        "/lowcmd_bare": {
+          "messages": 898,
+          "mean_hz": 94.54622024694184,
+          "max_gap_s": 0.02400000000000091
+        },
+        "/lowcmd": {
+          "messages": 904,
+          "mean_hz": 95.17793218623099,
+          "max_gap_s": 0.02400000000000091
+        }
+      }
+    },
+    {
+      "episode": 7,
+      "status": "success",
+      "speed_mps": 0.6,
+      "forward_m": 3.000805635857366,
+      "elapsed_sim_s": 10.842000001,
+      "scored_sim_s": 9.342000001,
+      "fall_condition": null,
+      "commands": {
+        "/lowcmd_bare": {
+          "messages": 1026,
+          "mean_hz": 94.63198670958937,
+          "max_gap_s": 0.012000001000000537
+        },
+        "/lowcmd": {
+          "messages": 1031,
+          "mean_hz": 95.09315623546456,
+          "max_gap_s": 0.012000001000000537
+        }
+      }
+    },
+    {
+      "episode": 8,
+      "status": "success",
+      "speed_mps": 0.6,
+      "forward_m": 3.0032031858508925,
+      "elapsed_sim_s": 10.048000001,
+      "scored_sim_s": 8.548000001,
+      "fall_condition": null,
+      "commands": {
+        "/lowcmd_bare": {
+          "messages": 948,
+          "mean_hz": 94.34713374857213,
+          "max_gap_s": 0.012000000000000455
+        },
+        "/lowcmd": {
+          "messages": 954,
+          "mean_hz": 94.94426750647449,
+          "max_gap_s": 0.012000000000000455
+        }
+      }
+    },
+    {
+      "episode": 9,
+      "status": "success",
+      "speed_mps": 0.6,
+      "forward_m": 3.0010601319931918,
+      "elapsed_sim_s": 10.020000001,
+      "scored_sim_s": 8.520000001,
+      "fall_condition": null,
+      "commands": {
+        "/lowcmd_bare": {
+          "messages": 949,
+          "mean_hz": 94.71057883286322,
+          "max_gap_s": 0.013999999999999346
+        },
+        "/lowcmd": {
+          "messages": 955,
+          "mean_hz": 95.30938122801304,
+          "max_gap_s": 0.013999999999999346
+        }
+      }
+    },
+    {
+      "episode": 10,
+      "status": "success",
+      "speed_mps": 0.6,
+      "forward_m": 3.0017481492107736,
+      "elapsed_sim_s": 9.588000001000001,
+      "scored_sim_s": 8.088000001000001,
+      "fall_condition": null,
+      "commands": {
+        "/lowcmd_bare": {
+          "messages": 907,
+          "mean_hz": 94.59741342359224,
+          "max_gap_s": 0.012000000999998761
+        },
+        "/lowcmd": {
+          "messages": 912,
+          "mean_hz": 95.11889861335847,
+          "max_gap_s": 0.012000000999998761
+        }
+      }
+    }
+  ]
+}

@@ -2,8 +2,8 @@
 
 ## Контейнер Participant
 
-Текущая реализация покрывает T1. Контейнер поддерживает команду `/entrypoint.sh ping`,
-которая возвращает JSON протокола `1.0` с пустым `supported_tasks`.
+Контейнер поддерживает проверку допуска T1 и режим T3. Команда `/entrypoint.sh ping`
+возвращает JSON протокола `1.0` с `supported_tasks=["T3"]`.
 
 | Компонент | Текущая реализация |
 | --- | --- |
@@ -11,7 +11,8 @@
 | Базовый образ | `ros:humble-ros-base-jammy`, закреплён по SHA-256 digest |
 | Робототехнический фреймворк | ROS 2 Humble |
 | Транспорт ROS 2 | Eclipse Cyclone DDS, пакет `ros-humble-rmw-cyclonedds-cpp`, `RMW_IMPLEMENTATION=rmw_cyclonedds_cpp` |
-| Точка входа | POSIX `sh`, скрипт `/entrypoint.sh`, аргумент по умолчанию `ping` |
+| Точка входа | Скрипт `/entrypoint.sh`, аргумент по умолчанию `ping`, режим `T3` запускает политику и Safety Block |
+| Политика T3 | Walk These Ways для Go1, веса `.npz`, инференс на CPU в NumPy |
 | Пользователь | `participant`, UID/GID `10001:10001` |
 | Сборка и проверка | Docker Buildx и запуск `ping` без сети |
 

@@ -7,3 +7,5 @@ __pycache__/
 # Local copy of the public simulator.
 /T3/go1-simulator-public-*/
 /T3/go1-simulator-public-*.zip
+
+/output/t3-training/

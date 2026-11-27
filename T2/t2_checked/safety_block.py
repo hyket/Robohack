@@ -181,6 +181,9 @@ class CommandStream:
         self.hold = hold_command(self.message_type, self.last_angles)
         self.holding = False
 
+    def prepare(self, message, previous_angles):
+        return self.command_filter.prepare(message, previous_angles)
+
     def collect_result(self, now_ns, fresh):
         if self.checking is None or not self.checking[0].done():
             return None
@@ -212,12 +215,12 @@ class CommandStream:
         if self.checking is None and self.pending is not None:
             message, received_ns = self.pending
             self.pending = None
-            future = self.worker.submit(self.command_filter.prepare, message, self.last_angles)
+            future = self.worker.submit(self.prepare, message, self.last_angles)
             self.checking = (future, received_ns)
         return error
 
 
-def create_safety_block(validation_worker, cli_args=None):
+def create_safety_block(validation_worker, cli_args=None, stream_type=CommandStream):
     from rclpy.node import Node
     from rclpy.qos import QoSProfile, ReliabilityPolicy
     from rosgraph_msgs.msg import Clock as ClockMessage
@@ -229,7 +232,7 @@ def create_safety_block(validation_worker, cli_args=None):
         def __init__(self):
             super().__init__("safety_block", cli_args=cli_args)
             self.sim_time_ns = 0
-            self.stream = CommandStream(LowCmd, collision_guard, worker=validation_worker)
+            self.stream = stream_type(LowCmd, collision_guard, worker=validation_worker)
             self.checked_commands = self.create_publisher(LowCmd, "/lowcmd", 20)
             command_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)
             clock_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.BEST_EFFORT)

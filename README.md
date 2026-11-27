@@ -1,27 +1,27 @@
-# Unitree Go1 · T1
+# Unitree Go1 · Participant
 
-Контейнер Participant для проверки T1. Образ рассчитан на `linux/amd64` и включает Ubuntu 22.04, ROS 2 Humble и Eclipse CycloneDDS (`rmw_cyclonedds_cpp`). По умолчанию контейнер работает с UID/GID `10001:10001`.
+Контейнер Participant поддерживает T3 и проверку допуска T1. Образ рассчитан на `linux/amd64` и включает Ubuntu 22.04, ROS 2 Humble и Eclipse Cyclone DDS (`rmw_cyclonedds_cpp`). Контейнер работает с UID/GID `10001:10001`.
 
-`/entrypoint.sh ping` возвращает один JSON-объект. В этой версии реализован T1, поэтому список `supported_tasks` пуст, `self_trained_rl` равно `false`, а `preferred_speed_mps` равно `null`.
+`/entrypoint.sh T3` запускает обученную авторами Walk These Ways политику Go1 и Safety Block из T2. Запуск публичного симулятора, запись видео и обучение описаны в [руководстве T3](T3/README.md). [Отдельный образ T2](T2/t2_checked/README.md) собирается из своего Dockerfile.
 
 План разработки и проверки всех пяти заданий, связи между ними и порядок сдачи собраны в [руководстве по заочному этапу](Docs/GUIDE.md). Для изучения с нуля откройте в браузере [HTML-учебник](Docs/GUIDE.html). В нём есть введение перед каждым заданием, схемы обмена между узлами и вопросы для самопроверки.
 
 ## Сборка и проверка
 
-Сборка загружает базовый образ и пакет CycloneDDS. Для запуска все зависимости уже находятся внутри образа.
+Сборка загружает зависимости ROS 2 и MuJoCo. Для запуска все зависимости и веса уже находятся внутри образа.
 
 ```sh
-docker buildx build --platform linux/amd64 --load -t go1-t1:local .
-docker image inspect --format '{{.Os}}/{{.Architecture}} {{.Config.User}}' go1-t1:local
+docker buildx build --platform linux/amd64 --load -t go1-participant:t3 .
+docker image inspect --format '{{.Os}}/{{.Architecture}} {{.Config.User}}' go1-participant:t3
 time docker run --rm --pull never --platform linux/amd64 --network none \
   --cap-drop ALL --security-opt no-new-privileges \
-  --entrypoint /entrypoint.sh go1-t1:local ping
+  --entrypoint /entrypoint.sh go1-participant:t3 ping
 ```
 
 Ожидаемый ответ с кодом завершения `0` за 10 секунд или быстрее.
 
 ```json
-{"protocol_version":"1.0","supported_tasks":[],"self_trained_rl":false,"preferred_speed_mps":null}
+{"protocol_version":"1.0","supported_tasks":["T3"],"self_trained_rl":false,"preferred_speed_mps":0.6}
 ```
 
 ## Публикация
