@@ -3,7 +3,7 @@ index f62ed78..3a1938b 100755
 --- a/go1_gym/envs/base/legged_robot.py
 +++ b/go1_gym/envs/base/legged_robot.py
 @@ -921,9 +921,8 @@ class LeggedRobot(BaseTask):
- 
+
          if self.cfg.domain_rand.randomize_lag_timesteps:
              self.lag_buffer = self.lag_buffer[1:] + [actions_scaled.clone()]
 -            self.joint_pos_target = self.lag_buffer[0] + self.default_dof_pos
@@ -11,13 +11,13 @@ index f62ed78..3a1938b 100755
 -            self.joint_pos_target = actions_scaled + self.default_dof_pos
 +            actions_scaled = self.lag_buffer[0]
 +        self._set_joint_pos_target(actions_scaled + self.default_dof_pos)
- 
+
          control_type = self.cfg.control.control_type
- 
+
 @@ -945,6 +944,9 @@ class LeggedRobot(BaseTask):
          torques = torques * self.motor_strengths
          return torch.clip(torques, -self.torque_limits, self.torque_limits)
- 
+
 +    def _set_joint_pos_target(self, target):
 +        self.joint_pos_target = target
 +
@@ -36,14 +36,15 @@ index f62ed78..3a1938b 100755
              self.env_origins[env_ids, 1] = spacing * yy.flatten()[:len(env_ids)]
 diff --git a/go1_gym/envs/go1/t3_forward_env.py b/go1_gym/envs/go1/t3_forward_env.py
 new file mode 100644
-index 0000000..ee03cba
+index 0000000..65f613d
 --- /dev/null
 +++ b/go1_gym/envs/go1/t3_forward_env.py
-@@ -0,0 +1,69 @@
-+from math import radians
+@@ -0,0 +1,151 @@
++from math import radians, sin
 +
 +import isaacgym
 +assert isaacgym
++from isaacgym.torch_utils import quat_apply
 +import torch
 +
 +from go1_gym.envs.base.legged_robot import LeggedRobot
@@ -57,18 +58,41 @@ index 0000000..ee03cba
 +    TARGET_INTERVAL = 0.010
 +    MAX_TARGET_STEP = radians(5.0) - 0.001
 +    PASSIVE_DAMPING = {"hip": 1.0, "thigh": 2.0, "calf": 2.0}
++    LATERAL_ERROR_SCALE_M = 0.60
++    HEADING_ERROR_SCALE_RAD = radians(20)
++    VALIDATION_SPEED_MPS = 0.60
++    VALIDATION_WARMUP_S = 1.5
++    VALIDATION_HORIZON_S = 12.0
++    VALIDATION_DISTANCE_M = 3.0
++    VALIDATION_FALL_S = 0.5
++
++    def __init__(self, *args, straightness_weight=0.0, **kwargs):
++        self.straightness_weight = straightness_weight
++        self.validation_active = False
++        super().__init__(*args, **kwargs)
 +
 +    def _init_command_distribution(self, env_ids):
 +        # Fixed commands sampled directly on the simulation device.
 +        self.env_command_bins = torch.zeros(self.num_train_envs, device=self.device)
 +        self.trot_command = torch.tensor(self.TROT, dtype=torch.float32, device=self.device)
 +
++    def _call_train_eval(self, func, env_ids):
++        if self.num_eval_envs and func in (self._get_env_origins, self._reset_dofs, self._reset_root_states):
++            # The two groups share the plane and reset parameters. Set each indexed state tensor once per step.
++            if len(env_ids):
++                return func(env_ids, self.cfg)
++            return None
++        return super()._call_train_eval(func, env_ids)
++
 +    def _resample_commands(self, env_ids):
 +        if len(env_ids) == 0:
 +            return
 +        low, high = self.cfg.commands.lin_vel_x
 +        self.commands[env_ids] = self.trot_command
-+        self.commands[env_ids, 0] = torch.rand(len(env_ids), device=self.device) * (high - low) + low
++        forward = torch.rand(len(env_ids), device=self.device) * (high - low) + low
++        if self.num_eval_envs:
++            forward.masked_fill_(env_ids >= self.num_train_envs, self.VALIDATION_SPEED_MPS)
++        self.commands[env_ids, 0] = forward
 +        for values in self.command_sums.values():
 +            values[env_ids] = 0
 +
@@ -78,6 +102,9 @@ index 0000000..ee03cba
 +
 +    def _init_buffers(self):
 +        super()._init_buffers()
++        self.course_origin_xy = torch.empty_like(self.base_pos[:, :2])
++        self.course_forward_xy = torch.empty_like(self.course_origin_xy)
++        self.straightness_step_weight = self.straightness_weight * self.dt
 +        # Look up limits by joint name so they follow the Isaac Gym DOF order.
 +        limits = [self.JOINT_LIMITS[name.split("_")[1]] for name in self.dof_names]
 +        self.target_lower, self.target_upper = torch.tensor(limits, device=self.device).T
@@ -90,6 +117,59 @@ index 0000000..ee03cba
 +    def reset_idx(self, env_ids):
 +        super().reset_idx(env_ids)
 +        self.joint_pos_target[env_ids] = self.default_dof_pos
++        if len(env_ids):
++            # Upstream reset_idx has written the new pose to root_states.
++            self.course_origin_xy[env_ids] = self.root_states[env_ids, :2]
++            forward = quat_apply(self.root_states[env_ids, 3:7], self.forward_vec[env_ids])
++            self.course_forward_xy[env_ids] = torch.nn.functional.normalize(forward[:, :2], dim=1)
++
++    def compute_reward(self):
++        super().compute_reward()
++        # Upstream computes rewards after refreshing physics and before resetting finished envs.
++        displacement = self.base_pos[:, :2] - self.course_origin_xy
++        heading = quat_apply(self.base_quat, self.forward_vec)[:, :2]
++        course_x, course_y = self.course_forward_xy.unbind(dim=1)
++        self.lateral_offset = course_x * displacement[:, 1] - course_y * displacement[:, 0]
++        self.heading_error = torch.atan2(course_x * heading[:, 1] - course_y * heading[:, 0],
++                                         course_x * heading[:, 0] + course_y * heading[:, 1])
++        self.course_forward_velocity = (self.root_states[:, 7:9] * self.course_forward_xy).sum(dim=1)
++        if self.validation_active:
++            evaluation = slice(self.num_train_envs, None)
++            gravity = self.projected_gravity[evaluation]
++            roll = torch.atan2(-gravity[:, 1], -gravity[:, 2]).abs()
++            self.validation_unstable = ((self.base_pos[evaluation, 2] < 0.16)
++                                        | (gravity[:, 0].abs() > sin(radians(50)))
++                                        | (roll > radians(50)))
++            self.validation_forward = (displacement[evaluation] * self.course_forward_xy[evaluation]).sum(dim=1)
++        if self.straightness_step_weight:
++            lateral_sq = (self.lateral_offset / self.LATERAL_ERROR_SCALE_M).square()
++            heading_sq = (self.heading_error / self.HEADING_ERROR_SCALE_RAD).square()
++            # Average two bounded x²/(1+x²) costs after the baseline reward shaping.
++            cost = 1 - 0.5 * (1 / (1 + lateral_sq) + 1 / (1 + heading_sq))
++            penalty = cost * self.straightness_step_weight
++            self.rew_buf.sub_(penalty)
++            self.episode_sums["total"].sub_(penalty)
++
++    def check_termination(self):
++        super().check_termination()
++        if self.validation_active:
++            # Continue measuring the same evaluation episode even when the training task would reset it.
++            self.reset_buf[self.num_train_envs:] = False
++
++    def begin_validation(self):
++        state = (self.common_step_counter, self.gravities[0].clone())
++        super()._randomize_gravity(torch.zeros_like(state[1]))
++        self.validation_active = True
++        return state
++
++    def end_validation(self, state):
++        self.validation_active = False
++        self.common_step_counter, gravity = state
++        super()._randomize_gravity(gravity)
++
++    def _randomize_gravity(self, external_force=None):
++        if not self.validation_active:
++            super()._randomize_gravity(external_force)
 +
 +    def _set_joint_pos_target(self, target):
 +        if self.target_substep % self.target_ticks == 0:
@@ -107,30 +187,32 @@ index 0000000..ee03cba
 +        # Keep rollout data on the simulation device. The command may have changed in reset_idx.
 +        info.update(privileged_obs=privileged_obs, env_bins=self.env_command_bins,
 +                    time_outs=self.time_out_buf[:self.num_train_envs],
-+                    forward_velocity=self.base_lin_vel[:, 0], forward_command=forward_command)
++                    forward_velocity=self.base_lin_vel[:, 0], forward_command=forward_command,
++                    lateral_offset=self.lateral_offset, heading_error=self.heading_error,
++                    course_forward_velocity=self.course_forward_velocity)
 +        return obs, reward, done, info
 diff --git a/go1_gym_learn/ppo_cse/__init__.py b/go1_gym_learn/ppo_cse/__init__.py
-index f1b0bdd..1b33dff 100755
+index f1b0bdd..ce3029f 100755
 --- a/go1_gym_learn/ppo_cse/__init__.py
 +++ b/go1_gym_learn/ppo_cse/__init__.py
 @@ -61,11 +61,12 @@ class RunnerArgs(PrefixProto, cli=False):
- 
+
  class Runner:
- 
+
 -    def __init__(self, env, device='cpu'):
 +    def __init__(self, env, device='cpu', init_weights=None, checkpoint_dir=None):
          from .ppo import PPO
- 
+
          self.device = device
          self.env = env
 +        self.checkpoint_dir = checkpoint_dir
- 
+
          actor_critic = ActorCritic(self.env.num_obs,
                                        self.env.num_privileged_obs,
 @@ -73,7 +74,10 @@ class Runner:
                                        self.env.num_actions,
                                        ).to(self.device)
- 
+
 -        if RunnerArgs.resume:
 +        if init_weights is not None:
 +            weights = torch.load(init_weights, map_location="cpu")
@@ -139,35 +221,48 @@ index f1b0bdd..1b33dff 100755
              # load pretrained weights from resume_path
              from ml_logger import ML_Logger
              loader = ML_Logger(root="http://escher.csail.mit.edu:8080",
-@@ -104,7 +108,8 @@ class Runner:
- 
+@@ -104,19 +108,27 @@ class Runner:
+
          self.env.reset()
- 
+
 -    def learn(self, num_learning_iterations, init_at_random_ep_len=False, eval_freq=100, curriculum_dump_freq=500, eval_expert=False):
 +    def learn(self, num_learning_iterations, init_at_random_ep_len=False, eval_freq=100,
-+              curriculum_dump_freq=500, eval_expert=False, iteration_callback=None):
++              curriculum_dump_freq=500, eval_expert=False, iteration_callback=None, validation=None):
          from ml_logger import logger
          # initialize writer
          assert logger.prefix, "you will overwrite the entire instrument server"
-@@ -112,8 +117,7 @@ class Runner:
+
          logger.start('start', 'epoch', 'episode', 'run', 'step')
- 
+
++        if validation is not None:
++            if self.checkpoint_dir is None or self.env.num_eval_envs < 1:
++                raise ValueError("Validation requires held-out environments and a checkpoint directory")
++            self._validate_checkpoint(validation, self.current_learning_iteration)
++            self.env.reset()
++
          if init_at_random_ep_len:
 -            self.env.episode_length_buf = torch.randint_like(self.env.episode_length_buf,
 -                                                             high=int(self.env.max_episode_length))
 +            self.env.episode_length_buf.random_(int(self.env.max_episode_length))
- 
+
          # split train and test envs
          num_train_envs = self.env.num_train_envs
-@@ -131,9 +135,17 @@ class Runner:
++        if validation is not None:
++            eval_idle_actions = torch.zeros((self.env.num_eval_envs, self.env.num_actions), device=self.device)
+
+         obs_dict = self.env.get_observations()  # TODO: check, is this correct on the first step?
+         obs, privileged_obs, obs_history = obs_dict["obs"], obs_dict["privileged_obs"], obs_dict["obs_history"]
+@@ -131,15 +143,28 @@ class Runner:
          cur_reward_sum = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
          cur_episode_length = torch.zeros(self.env.num_envs, dtype=torch.float, device=self.device)
- 
+
 +        rollout_stats = None
++        course_stats = None
 +        cuda_timing = iteration_callback is not None and torch.device(self.device).type == "cuda"
 +        if iteration_callback is not None:
 +            # Record rewards, measured forward speed and commanded speed on-device.
 +            rollout_stats = torch.empty((3, self.num_steps_per_env, num_train_envs), device=self.device)
++            course_stats = torch.empty_like(rollout_stats)
 +
          tot_iter = self.current_learning_iteration + num_learning_iterations
 +        learn_start = time.perf_counter()
@@ -175,27 +270,43 @@ index f1b0bdd..1b33dff 100755
 -            start = time.time()
 +            start = time.perf_counter()
 +            velocity_samples = 0
++            course_samples = 0
              # Rollout
              with torch.inference_mode():
                  for i in range(self.num_steps_per_env):
-@@ -153,6 +165,13 @@ class Runner:
+                     actions_train = self.alg.act(obs[:num_train_envs], privileged_obs[:num_train_envs],
+                                                  obs_history[:num_train_envs])
+-                    if eval_expert:
++                    if validation is not None:
++                        actions_eval = eval_idle_actions
++                    elif eval_expert:
+                         actions_eval = self.alg.actor_critic.act_teacher(obs_history[num_train_envs:],
+                                                                          privileged_obs[num_train_envs:])
+                     else:
+@@ -153,6 +178,19 @@ class Runner:
                          self.device), obs_history.to(self.device), rewards.to(self.device), dones.to(self.device)
                      self.alg.process_env_step(rewards[:num_train_envs], dones[:num_train_envs], infos)
- 
+
 +                    if rollout_stats is not None:
 +                        rollout_stats[0, i].copy_(rewards[:num_train_envs])
 +                        if "forward_velocity" in infos and "forward_command" in infos:
 +                            rollout_stats[1, velocity_samples].copy_(infos["forward_velocity"][:num_train_envs])
 +                            rollout_stats[2, velocity_samples].copy_(infos["forward_command"][:num_train_envs])
 +                            velocity_samples += 1
++                        if "course_forward_velocity" in infos:
++                            course_stats[0, course_samples].copy_(infos["lateral_offset"][:num_train_envs])
++                            course_stats[1, course_samples].copy_(infos["heading_error"][:num_train_envs])
++                            forward_error = infos["course_forward_velocity"] - infos["forward_command"]
++                            course_stats[2, course_samples].copy_(forward_error[:num_train_envs])
++                            course_samples += 1
 +
                      if 'train/episode' in infos:
                          with logger.Prefix(metrics="train/episode"):
                              logger.store_metrics(**infos['train/episode'])
-@@ -183,11 +202,9 @@ class Runner:
+@@ -183,11 +221,9 @@ class Runner:
                      if 'curriculum/distribution' in infos:
                          distribution = infos['curriculum/distribution']
- 
+
 -                stop = time.time()
 -                collection_time = stop - start
 -
@@ -205,31 +316,31 @@ index f1b0bdd..1b33dff 100755
 +                    torch.cuda.synchronize(self.device)
 +                rollout_end = time.perf_counter()
                  self.alg.compute_returns(obs_history[:num_train_envs], privileged_obs[:num_train_envs])
- 
+
                  if it % curriculum_dump_freq == 0:
-@@ -202,11 +219,11 @@ class Runner:
+@@ -202,11 +238,11 @@ class Runner:
                                           path=f"curriculum/distribution.pkl", append=True)
- 
+
              mean_value_loss, mean_surrogate_loss, mean_adaptation_module_loss, mean_decoder_loss, mean_decoder_loss_student, mean_adaptation_module_test_loss, mean_decoder_test_loss, mean_decoder_test_loss_student = self.alg.update()
 -            stop = time.time()
 -            learn_time = stop - start
 +            if cuda_timing:
 +                torch.cuda.synchronize(self.device)
 +            update_end = time.perf_counter()
- 
+
              logger.store_metrics(
 -                # total_time=learn_time - collection_time,
                  time_elapsed=logger.since('start'),
                  time_iter=logger.split('epoch'),
                  adaptation_loss=mean_adaptation_module_loss,
-@@ -222,57 +239,67 @@ class Runner:
+@@ -222,57 +258,175 @@ class Runner:
              if RunnerArgs.save_video_interval:
                  self.log_video(it)
- 
+
 -            self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
 -            if logger.every(RunnerArgs.log_freq, "iteration", start_on=1):
 -                # if it % Config.log_freq == 0:
-+            env_steps = self.num_steps_per_env * self.env.num_envs
++            env_steps = self.num_steps_per_env * num_train_envs
 +            self.tot_timesteps += env_steps
 +            if iteration_callback is not None:
 +                iteration_seconds = update_end - start
@@ -240,6 +351,12 @@ index f1b0bdd..1b33dff 100755
 +                    means.update(forward_velocity_mps=velocities.mean(),
 +                                 commanded_forward_velocity_mps=commands.mean(),
 +                                 forward_velocity_rmse_mps=(velocities - commands).square().mean().sqrt())
++                if course_samples:
++                    lateral_abs = course_stats[0, :course_samples].abs()
++                    means.update(lateral_offset_mae_m=lateral_abs.mean(),
++                                 lateral_offset_max_abs_m=lateral_abs.max(),
++                                 heading_error_mae_deg=torch.rad2deg(course_stats[1, :course_samples].abs().mean()),
++                                 course_forward_velocity_rmse_mps=course_stats[2, :course_samples].square().mean().sqrt())
 +                # Transfer aggregate values together, once per iteration.
 +                stats = dict(zip(means, torch.stack(tuple(means.values())).tolist()))
 +                iteration_callback(dict(iteration=it + 1, elapsed_seconds=update_end - learn_start,
@@ -249,11 +366,12 @@ index f1b0bdd..1b33dff 100755
 +                                        policy_learning_rate=self.alg.optimizer.param_groups[0]["lr"],
 +                                        value_loss=mean_value_loss, surrogate_loss=mean_surrogate_loss,
 +                                        adaptation_loss=mean_adaptation_module_loss,
-+                                        adaptation_test_loss=mean_adaptation_module_test_loss, **stats))
++                                        adaptation_test_loss=mean_adaptation_module_test_loss, **stats,
++                                        **getattr(self.alg, "last_update_metrics", {})))
 +            if logger.every(RunnerArgs.log_freq, "iteration", start_on=1) or it == tot_iter - 1:
                  logger.log_metrics_summary(key_values={"timesteps": self.tot_timesteps, "iterations": it})
                  logger.job_running()
- 
+
 -            if it % RunnerArgs.save_interval == 0:
 -                with logger.Sync():
 -                    logger.torch_save(self.alg.actor_critic.state_dict(), f"checkpoints/ac_weights_{it:06d}.pt")
@@ -277,31 +395,133 @@ index f1b0bdd..1b33dff 100755
 -                    logger.upload_file(file_path=body_path, target_path=f"checkpoints/", once=False)
 -
 -            self.current_learning_iteration += num_learning_iterations
-+            if it % RunnerArgs.save_interval == 0 or it == tot_iter - 1:
-+                self._save_checkpoint(it)
+-
 +            self.current_learning_iteration = it + 1
++            if validation is None:
++                if it % RunnerArgs.save_interval == 0 or it == tot_iter - 1:
++                    self._save_checkpoint(it)
++            elif (it + 1) % validation.every == 0 or it == tot_iter - 1:
++                if self._validate_checkpoint(validation, it + 1):
++                    break
++                if it < tot_iter - 1:
++                    self.env.reset()
++                    if init_at_random_ep_len:
++                        self.env.episode_length_buf[:num_train_envs].random_(int(self.env.max_episode_length))
++                    obs_dict = self.env.get_observations()
++                    obs = obs_dict["obs"].to(self.device)
++                    privileged_obs = obs_dict["privileged_obs"].to(self.device)
++                    obs_history = obs_dict["obs_history"].to(self.device)
++                    cur_reward_sum.zero_()
++                    cur_episode_length.zero_()
++            elif (it + 1) % RunnerArgs.save_interval == 0:
++                self._save_numbered_checkpoint(it + 1)
++
++        if validation is not None:
++            selected = self.checkpoint_dir / validation.best["checkpoint"]
++            self.alg.actor_critic.load_state_dict(torch.load(selected, map_location="cpu"))
++            self._export_local_checkpoint(selected)
++
++    def _validate_checkpoint(self, validation, iteration):
++        checkpoint = self._save_numbered_checkpoint(iteration)
++        print(f"Isaac validation at update {iteration}: {self.env.num_eval_envs} held-out lanes", flush=True)
++        episodes = self._validation_rollout(validation.seed)
++        return validation.record(iteration, checkpoint.name, episodes)
++
++    @torch.no_grad()
++    def _validation_rollout(self, seed):
++        device = torch.device(self.device)
++        cuda_devices = [device] if device.type == "cuda" else []
++        actor = self.alg.actor_critic
++        was_training = actor.training
++        state = self.env.begin_validation()
++        try:
++            with torch.random.fork_rng(devices=cuda_devices):
++                torch.random.default_generator.manual_seed(seed)
++                if cuda_devices:
++                    with torch.cuda.device(device):
++                        torch.cuda.manual_seed(seed)
++                actor.eval()
++                self.env.reset()
++                observations = self.env.get_observations()
++                return self._measure_validation_episodes(observations, actor)
++        finally:
++            self.env.end_validation(state)
++            actor.train(was_training)
++
++    def _measure_validation_episodes(self, observations, actor):
++        env = self.env
++        lanes = slice(env.num_train_envs, None)
++        actions = torch.zeros((env.num_envs, env.num_actions), device=self.device)
++        arrival = torch.zeros(env.num_eval_envs, dtype=torch.long, device=self.device)
++        unstable_steps = torch.zeros_like(arrival)
++        failed = torch.zeros_like(arrival, dtype=torch.bool)
++        max_lateral = torch.zeros_like(arrival, dtype=torch.float)
++        max_heading = torch.zeros_like(max_lateral)
++        warmup_steps = round(env.VALIDATION_WARMUP_S / env.dt)
++        scoring_steps = round(env.VALIDATION_HORIZON_S / env.dt)
++        fall_steps = round(env.VALIDATION_FALL_S / env.dt)
++        for step in range(1, warmup_steps + scoring_steps + 1):
++            # Match act_student's mean action while keeping inference and metrics on the simulation device.
++            history = observations["obs_history"][lanes].to(self.device)
++            latent = actor.adaptation_module(history)
++            actions[lanes] = actor.actor_body(torch.cat((history, latent), dim=-1))
++            observations, _, _, info = env.step(actions)
++            forward, lateral, heading = env.validation_forward, info["lateral_offset"][lanes], info["heading_error"][lanes]
++            valid = torch.isfinite(forward) & torch.isfinite(lateral) & torch.isfinite(heading)
++            unstable_steps = torch.where(env.validation_unstable, unstable_steps + 1, 0)
++            failed |= (arrival == 0) & (~valid | (unstable_steps >= fall_steps))
++            if step == warmup_steps:
++                forward_start = forward.clone()
++                lateral_start = lateral.clone()
++            if step <= warmup_steps:
++                continue
++            active = ~failed & (arrival == 0)
++            max_lateral = torch.where(active, torch.maximum(max_lateral, (lateral - lateral_start).abs()), max_lateral)
++            max_heading = torch.where(active, torch.maximum(max_heading, heading.abs()), max_heading)
++            reached = active & ((forward - forward_start) >= env.VALIDATION_DISTANCE_M)
++            arrival[reached] = step - warmup_steps
++            if step % 25 == 0 and not (~failed & (arrival == 0)).any():
++                break
++
++        return [
++            dict(status="success" if steps else "fall" if fall else "timeout",
++                 time_to_3m_s=steps * env.dt if steps else None,
++                 max_cross_track_m=lateral, max_heading_deviation_deg=heading)
++            for steps, fall, lateral, heading in torch.stack(
++                (arrival, failed, max_lateral, torch.rad2deg(max_heading)), dim=1).tolist()
++        ]
++
++    def _save_numbered_checkpoint(self, iteration):
++        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
++        checkpoint = self.checkpoint_dir / f"ac_weights_{iteration:06d}.pt"
++        staging = checkpoint.with_suffix(".tmp")
++        torch.save(self.alg.actor_critic.state_dict(), staging)
++        staging.replace(checkpoint)
++        return checkpoint
++
++    def _export_local_checkpoint(self, checkpoint):
++        from shutil import copyfile
++
++        actor_critic = self.alg.actor_critic
++        for name, module in (("adaptation_module", actor_critic.adaptation_module),
++                             ("body", actor_critic.actor_body)):
++            scripted = torch.jit.script(copy.deepcopy(module).eval().cpu())
++            target = self.checkpoint_dir / f"{name}_latest.jit"
++            staging = target.with_suffix(".tmp")
++            scripted.save(str(staging))
++            staging.replace(target)
++        latest = self.checkpoint_dir / "ac_weights_last.pt"
++        staging = latest.with_suffix(".tmp")
++        copyfile(checkpoint, staging)
++        staging.replace(latest)
 +
 +    def _save_checkpoint(self, iteration):
++        if self.checkpoint_dir is not None:
++            self._export_local_checkpoint(self._save_numbered_checkpoint(iteration))
++            return
++
 +        actor_critic = self.alg.actor_critic
 +        filename = f"ac_weights_{iteration:06d}.pt"
-+        if self.checkpoint_dir is not None:
-+            from shutil import copyfile
-+
-+            self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-+            torch.save(actor_critic.state_dict(), self.checkpoint_dir / filename)
-+            for name, module in (("adaptation_module", actor_critic.adaptation_module),
-+                                 ("body", actor_critic.actor_body)):
-+                scripted = torch.jit.script(copy.deepcopy(module).eval().cpu())
-+                target = self.checkpoint_dir / f"{name}_latest.jit"
-+                staging = target.with_suffix(".tmp")
-+                scripted.save(str(staging))
-+                staging.replace(target)
-+            latest = self.checkpoint_dir / "ac_weights_last.pt"
-+            staging = latest.with_suffix(".tmp")
-+            copyfile(self.checkpoint_dir / filename, staging)
-+            staging.replace(latest)
-+            return
- 
          with logger.Sync():
 -            logger.torch_save(self.alg.actor_critic.state_dict(), f"checkpoints/ac_weights_{it:06d}.pt")
 -            logger.duplicate(f"checkpoints/ac_weights_{it:06d}.pt", f"checkpoints/ac_weights_last.pt")
@@ -332,21 +552,249 @@ index f1b0bdd..1b33dff 100755
 +                export_path = f"{path}/{name}_latest.jit"
 +                scripted.save(export_path)
 +                logger.upload_file(file_path=export_path, target_path="checkpoints/", once=False)
- 
+
      def log_video(self, it):
          if it - self.last_recording_it >= RunnerArgs.save_video_interval:
+diff --git a/go1_gym_learn/ppo_cse/ppo.py b/go1_gym_learn/ppo_cse/ppo.py
+index 5fd8375..644dfa9 100755
+--- a/go1_gym_learn/ppo_cse/ppo.py
++++ b/go1_gym_learn/ppo_cse/ppo.py
+@@ -1,3 +1,6 @@
++import math
++import os
++
+ import torch
+ import torch.nn as nn
+ import torch.optim as optim
+@@ -50,6 +53,18 @@ class PPO:
+         self.transition = RolloutStorage.Transition()
+
+         self.learning_rate = PPO_Args.learning_rate
++        self.target_kl = float(os.environ.get("WTW_TARGET_KL", "0"))
++        if not math.isfinite(self.target_kl) or self.target_kl < 0:
++            raise ValueError("WTW_TARGET_KL must be finite and nonnegative")
++        self.last_update_steps = 0
++        self.last_kl = None
++        self.last_kl_stopped = False
++
++    @property
++    def last_update_metrics(self):
++        return dict(ppo_update_steps=self.last_update_steps,
++                    ppo_kl=self.last_kl,
++                    ppo_kl_stopped=self.last_kl_stopped)
+
+     def init_storage(self, num_envs, num_transitions_per_env, actor_obs_shape, privileged_obs_shape, obs_history_shape,
+                      action_shape):
+@@ -95,6 +110,9 @@ class PPO:
+         self.storage.compute_returns(last_values, PPO_Args.gamma, PPO_Args.lam)
+
+     def update(self):
++        self.last_update_steps = 0
++        self.last_kl = None
++        self.last_kl_stopped = False
+         mean_value_loss = 0
+         mean_surrogate_loss = 0
+         mean_adaptation_module_loss = 0
+@@ -108,10 +126,23 @@ class PPO:
+             old_mu_batch, old_sigma_batch, masks_batch, env_bins_batch in generator:
+
+             self.actor_critic.act(obs_history_batch, masks=masks_batch)
+-            actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
+-            value_batch = self.actor_critic.evaluate(obs_history_batch, privileged_obs_batch, masks=masks_batch)
+             mu_batch = self.actor_critic.action_mean
+             sigma_batch = self.actor_critic.action_std
++
++            if self.target_kl > 0:
++                with torch.inference_mode():
++                    # Exact KL(rollout || current) at the same observation histories.
++                    log_variance_ratio = 2 * (old_sigma_batch.log() - sigma_batch.log())
++                    mean_shift = (old_mu_batch - mu_batch) / sigma_batch
++                    kl = 0.5 * (log_variance_ratio.expm1() - log_variance_ratio + mean_shift.square())
++                    kl_mean = kl.sum(dim=-1).mean().item()
++                self.last_kl = kl_mean if math.isfinite(kl_mean) else None
++                if self.last_kl is None or self.last_kl > self.target_kl:
++                    self.last_kl_stopped = True
++                    break
++
++            actions_log_prob_batch = self.actor_critic.get_actions_log_prob(actions_batch)
++            value_batch = self.actor_critic.evaluate(obs_history_batch, privileged_obs_batch, masks=masks_batch)
+             entropy_batch = self.actor_critic.entropy
+
+             # KL
+@@ -191,15 +222,18 @@ class PPO:
+                 mean_adaptation_module_loss += adaptation_loss.item()
+                 mean_adaptation_module_test_loss += adaptation_test_loss.item()
+
+-        num_updates = PPO_Args.num_learning_epochs * PPO_Args.num_mini_batches
++            self.last_update_steps += 1
++
++        num_updates = max(1, self.last_update_steps)
++        num_adaptation_updates = max(1, self.last_update_steps * PPO_Args.num_adaptation_module_substeps)
+         mean_value_loss /= num_updates
+         mean_surrogate_loss /= num_updates
+-        mean_adaptation_module_loss /= (num_updates * PPO_Args.num_adaptation_module_substeps)
+-        mean_decoder_loss /= (num_updates * PPO_Args.num_adaptation_module_substeps)
+-        mean_decoder_loss_student /= (num_updates * PPO_Args.num_adaptation_module_substeps)
+-        mean_adaptation_module_test_loss /= (num_updates * PPO_Args.num_adaptation_module_substeps)
+-        mean_decoder_test_loss /= (num_updates * PPO_Args.num_adaptation_module_substeps)
+-        mean_decoder_test_loss_student /= (num_updates * PPO_Args.num_adaptation_module_substeps)
++        mean_adaptation_module_loss /= num_adaptation_updates
++        mean_decoder_loss /= num_adaptation_updates
++        mean_decoder_loss_student /= num_adaptation_updates
++        mean_adaptation_module_test_loss /= num_adaptation_updates
++        mean_decoder_test_loss /= num_adaptation_updates
++        mean_decoder_test_loss_student /= num_adaptation_updates
+         self.storage.clear()
+
+         return mean_value_loss, mean_surrogate_loss, mean_adaptation_module_loss, mean_decoder_loss, mean_decoder_loss_student, mean_adaptation_module_test_loss, mean_decoder_test_loss, mean_decoder_test_loss_student
 diff --git a/scripts/train.py b/scripts/train.py
-index d6aa3d2..7c02836 100755
+index d6aa3d2..da5eb05 100755
 --- a/scripts/train.py
 +++ b/scripts/train.py
-@@ -1,12 +1,37 @@
+@@ -1,12 +1,186 @@
 -def train_go1(headless=True):
 +import json
 +import os
 +import random
-+from contextlib import ExitStack
-+from math import isfinite
++from contextlib import ExitStack, contextmanager
++from math import degrees, isfinite
 +from pathlib import Path
++from statistics import median
++from types import SimpleNamespace
++
++
++@contextmanager
++def wandb_tracking(run_dir, requested_mode, training):
++    if requested_mode == "disabled":
++        yield None
++        return
++
++    entity = os.environ.get("WANDB_ENTITY") or None
++    project = os.environ.get("WANDB_PROJECT") or "robohack-t3"
++    group = os.environ.get("WANDB_RUN_GROUP") or None
++
++    # W&B 0.18.7 can query the viewer before the run-init timeout starts.
++    os.environ["WANDB__DISABLE_VIEWER"] = "true"
++    os.environ["WANDB__SERVICE_WAIT"] = "10"
++    os.environ["WANDB_LOGIN_TIMEOUT"] = "1"
++
++    run = None
++    effective_mode = "disabled"
++    try:
++        import wandb
++        from wandb.sdk.lib.apikey import api_key
++    except ImportError:
++        print("T3 W&B: SDK unavailable. Metrics will be recorded in metrics.jsonl.", flush=True)
++    else:
++        modes = ("online", "offline") if requested_mode == "online" else ("offline",)
++        for mode in modes:
++            try:
++                if mode == "online":
++                    settings = wandb.setup().settings
++                    if not (settings.identity_token_file or api_key(settings)):
++                        print("T3 W&B: Credentials unavailable. Switching to offline logging.", flush=True)
++                        continue
++
++                run = wandb.init(project=project, entity=entity, group=group, name=os.environ.get("WANDB_NAME") or run_dir.name,
++                                 dir=str(run_dir), mode=mode, anonymous="never", save_code=False,
++                                 config={**training, "wandb_offline": mode == "offline"},
++                                 settings=wandb.Settings(init_timeout=15, quiet=True, console="off",
++                                                         disable_git=True))
++                if run.disabled:
++                    run = None
++                    raise RuntimeError("W&B disabled the run")
++                effective_mode = "offline" if run.offline else "online"
++                if mode == "online" and not run.offline:
++                    print(f"T3 W&B: Live run {run.path}", flush=True)
++                break
++            except Exception as exc:
++                # Do not print exception details, which may contain credentials.
++                suffix = "Switching to offline logging." if mode == "online" else "Metrics will be recorded in metrics.jsonl."
++                print(f"T3 W&B: {mode} initialization failed ({type(exc).__name__}). {suffix}", flush=True)
++
++    (run_dir / "wandb_status.json").write_text(json.dumps(
++        dict(requested_mode=requested_mode, effective_mode=effective_mode, entity=entity,
++             project=project, group=group, run_id=run.id if run is not None else None),
++        indent=2,
++    ) + "\n", encoding="utf-8")
++    completed = False
++    try:
++        yield run
++        completed = True
++    finally:
++        if run is not None:
++            try:
++                run.finish(exit_code=0 if completed else 1)
++            except Exception as exc:
++                print(f"T3 W&B: Finish failed ({type(exc).__name__}). Local metrics are available.", flush=True)
++
++
++class Validation:
++    TIME_TOLERANCE = 0.10
++
++    def __init__(self, *, stream, every, patience, seed, report=None):
++        self.stream = stream
++        self.every = every
++        self.patience = patience
++        self.seed = seed
++        self.best = None
++        self.time_limit_s = None
++        self.rounds_without_improvement = 0
++        self.report = report
++
++    @staticmethod
++    def _rank(row):
++        if row["success_count"] == 0:
++            return (0, float("inf"), float("inf"))
++        return (-row["success_count"], row["median_max_cross_track_m"], row["median_time_to_3m_s"])
++
++    def record(self, iteration, checkpoint, episodes):
++        successes = [episode for episode in episodes if episode["status"] == "success"]
++        time_s = median(episode["time_to_3m_s"] for episode in successes) if successes else None
++        max_lateral = [episode["max_cross_track_m"] for episode in successes]
++        baseline = self.best is None
++        if baseline and time_s is not None:
++            self.time_limit_s = time_s * (1 + self.TIME_TOLERANCE)
++        eligible = time_s is not None and (self.time_limit_s is None or time_s <= self.time_limit_s)
++        row = dict(iteration=iteration, checkpoint=checkpoint, success_count=len(successes),
++                   success_rate=len(successes) / len(episodes), median_time_to_3m_s=time_s,
++                   median_max_cross_track_m=median(max_lateral) if max_lateral else None,
++                   worst_max_cross_track_m=max(max_lateral) if max_lateral else None,
++                   initial_time_limit_s=self.time_limit_s, eligible=eligible, episodes=episodes)
++        if baseline or (eligible and self._rank(row) < self._rank(self.best)):
++            self.best = row
++            self.rounds_without_improvement = 0
++        else:
++            self.rounds_without_improvement += 1
++        row.update(selected_checkpoint=self.best["checkpoint"],
++                   rounds_without_improvement=self.rounds_without_improvement)
++        self.stream.write(json.dumps(row, allow_nan=False) + "\n")
++        if self.report is not None:
++            self.report(row)
++        print(f"Isaac validation {iteration}: {len(successes)}/{len(episodes)} reached 3 m, "
++              f"median time {time_s}, median cross-track {row['median_max_cross_track_m']}, "
++              f"selected {self.best['checkpoint']}", flush=True)
++        return self.patience > 0 and self.rounds_without_improvement >= self.patience
++
++    def summary(self, *, iterations, requested):
++        if self.best["success_count"] == 0:
++            reason = "no_successful_validation"
++        elif self.best["iteration"] == 0:
++            reason = "initial_checkpoint_retained"
++        elif self.time_limit_s is None:
++            reason = "best_without_initial_time_reference"
++        else:
++            reason = "best_within_initial_time_limit"
++        return dict(selected_checkpoint=f"checkpoints/{self.best['checkpoint']}",
++                    selected_iteration=self.best["iteration"], selection_reason=reason,
++                    selected_success_rate=self.best["success_rate"],
++                    selected_median_time_to_3m_s=self.best["median_time_to_3m_s"],
++                    selected_median_max_cross_track_m=self.best["median_max_cross_track_m"],
++                    initial_time_limit_s=self.time_limit_s,
++                    iterations_completed=iterations, iterations_requested=requested,
++                    last_trained_checkpoint=f"checkpoints/ac_weights_{iterations:06d}.pt",
++                    stopped_early=iterations < requested,
++                    rounds_without_improvement=self.rounds_without_improvement)
 +
 +
 +def train_go1():
@@ -356,9 +804,22 @@ index d6aa3d2..7c02836 100755
 +    iterations = int(os.environ.get("WTW_ITERATIONS", "400"))
 +    seed = int(os.environ.get("WTW_SEED", "42"))
 +    learning_rate = float(os.environ.get("WTW_LEARNING_RATE", "0.0001"))
-+    use_wandb = os.environ.get("WTW_WANDB") == "1"
++    straightness_weight = float(os.environ.get("WTW_STRAIGHTNESS_WEIGHT", "0"))
++    speed_min = float(os.environ.get("WTW_FORWARD_SPEED_MIN", "0.1"))
++    speed_max = float(os.environ.get("WTW_FORWARD_SPEED_MAX", "0.6"))
++    eval_every = int(os.environ.get("WTW_EVAL_EVERY", "0"))
++    eval_envs = int(os.environ.get("WTW_EVAL_ENVS", "16"))
++    patience = int(os.environ.get("WTW_EARLY_STOPPING_ROUNDS", "0"))
++    validation_seed = seed + 10_000
++    wandb_mode = os.environ.get("WTW_WANDB_MODE", "offline" if os.environ.get("WTW_WANDB") == "1" else "disabled")
 +    if not isfinite(learning_rate) or learning_rate <= 0:
 +        raise ValueError("WTW_LEARNING_RATE must be finite and positive")
++    if not isfinite(straightness_weight) or straightness_weight < 0:
++        raise ValueError("WTW_STRAIGHTNESS_WEIGHT must be finite and non-negative")
++    if not 0.1 <= speed_min <= speed_max <= 0.6:
++        raise ValueError("Forward command range must satisfy 0.1 <= MIN <= MAX <= 0.6 m/s")
++    if eval_every < 0 or eval_envs < 1 or patience < 0 or (patience > 0 and eval_every == 0):
++        raise ValueError("Validation requires non-negative cadence and patience, positive lanes, and a cadence for early stopping")
 +    if not run_dir.is_absolute() or not run_dir.name:
 +        raise ValueError("WTW_RUN_DIR must be an absolute run directory")
 +    if not weights.is_file() or num_envs < 1 or iterations < 1 or not 0 <= seed < 2**32:
@@ -366,42 +827,41 @@ index d6aa3d2..7c02836 100755
 +    run_dir.mkdir(parents=True, exist_ok=True)
 +    if (run_dir / "parameters.pkl").exists() or (run_dir / "checkpoints").exists():
 +        raise FileExistsError(f"Choose a fresh WTW_RUN_DIR: {run_dir}")
- 
+
      import isaacgym
      assert isaacgym
 +    import numpy as np
      import torch
- 
+
      from go1_gym.envs.base.legged_robot_config import Cfg
      from go1_gym.envs.go1.go1_config import config_go1
 -    from go1_gym.envs.go1.velocity_tracking import VelocityTrackingEasyEnv
 +    from go1_gym.envs.go1.t3_forward_env import T3ForwardEnv
- 
+
      from ml_logger import logger
- 
-@@ -18,18 +43,20 @@ def train_go1(headless=True):
- 
+
+@@ -18,18 +192,20 @@ def train_go1(headless=True):
+
      config_go1(Cfg)
- 
+
 -    Cfg.commands.num_lin_vel_bins = 30
 -    Cfg.commands.num_ang_vel_bins = 30
 -    Cfg.curriculum_thresholds.tracking_ang_vel = 0.7
 -    Cfg.curriculum_thresholds.tracking_lin_vel = 0.8
 -    Cfg.curriculum_thresholds.tracking_contacts_shaped_vel = 0.90
 -    Cfg.curriculum_thresholds.tracking_contacts_shaped_force = 0.90
--
--    Cfg.commands.distributional_commands = True
--
--    Cfg.domain_rand.lag_timesteps = 6
--    Cfg.domain_rand.randomize_lag_timesteps = True
--    Cfg.control.control_type = "actuator_net"
 +    if not torch.cuda.is_available():
 +        raise RuntimeError("CUDA is required for Isaac Gym T3 training")
 +    device = "cuda:0"
 +    random.seed(seed)
 +    np.random.seed(seed)
 +    torch.manual_seed(seed)
-+
+
+-    Cfg.commands.distributional_commands = True
+-
+-    Cfg.domain_rand.lag_timesteps = 6
+-    Cfg.domain_rand.randomize_lag_timesteps = True
+-    Cfg.control.control_type = "actuator_net"
 +    Cfg.env.num_envs = num_envs
 +    Cfg.env.record_video = False
 +    Cfg.domain_rand.lag_timesteps = 0
@@ -409,13 +869,13 @@ index d6aa3d2..7c02836 100755
 +    Cfg.control.control_type = "P"
 +    Cfg.control.stiffness = {"joint": 40.0}
 +    Cfg.control.damping = {"joint": 0.5}
- 
+
      Cfg.domain_rand.randomize_rigids_after_start = False
      Cfg.env.priv_observe_motion = False
-@@ -89,23 +116,8 @@ def train_go1(headless=True):
+@@ -89,23 +265,8 @@ def train_go1(headless=True):
      Cfg.env.observe_timing_parameter = False
      Cfg.env.observe_clock_inputs = True
- 
+
 -    Cfg.domain_rand.tile_height_range = [-0.0, 0.0]
 -    Cfg.domain_rand.tile_height_curriculum = False
 -    Cfg.domain_rand.tile_height_update_interval = 1000000
@@ -437,12 +897,56 @@ index d6aa3d2..7c02836 100755
      Cfg.rewards.use_terminal_foot_height = False
      Cfg.rewards.use_terminal_body_height = True
      Cfg.rewards.terminal_body_height = 0.05
-@@ -148,109 +160,53 @@ def train_go1(headless=True):
+@@ -148,109 +309,105 @@ def train_go1(headless=True):
      Cfg.rewards.only_positive_rewards_ji22_style = True
      Cfg.rewards.sigma_rew_neg = 0.02
- 
--
--
+
++    Cfg.commands.command_curriculum = False
++    Cfg.commands.lin_vel_x = [speed_min, speed_max]
++    Cfg.commands.lin_vel_y = [0.0, 0.0]
++    Cfg.commands.ang_vel_yaw = [0.0, 0.0]
++    Cfg.normalization.friction_range = [0, 1]
++    Cfg.normalization.clip_actions = 10.0
++
++    # Use small updates to keep the initial walking policy while adapting to PD.
++    PPO_Args.learning_rate = learning_rate
++    PPO_Args.adaptation_module_learning_rate = 1e-4
++    PPO_Args.schedule = "fixed"
++    RunnerArgs.save_video_interval = 0
++    RunnerArgs.save_interval = 100
+
++    gpu = torch.cuda.get_device_name(0)
++    training = dict(seed=seed, num_envs=num_envs, iterations=iterations, init_weights=str(weights),
++                    policy_learning_rate=learning_rate, adaptation_learning_rate=PPO_Args.adaptation_module_learning_rate,
++                    ppo_epochs=PPO_Args.num_learning_epochs, mini_batches=PPO_Args.num_mini_batches,
++                    rollout_steps=RunnerArgs.num_steps_per_env, trot=T3ForwardEnv.TROT,
++                    straightness_weight=straightness_weight,
++                    straightness_lateral_scale_m=T3ForwardEnv.LATERAL_ERROR_SCALE_M,
++                    straightness_heading_scale_deg=degrees(T3ForwardEnv.HEADING_ERROR_SCALE_RAD),
++                    commanded_forward_velocity_range=Cfg.commands.lin_vel_x, gpu=gpu,
++                    target_kl=float(os.environ.get("WTW_TARGET_KL", "0")),
++                    wandb_mode=wandb_mode, wandb_offline=wandb_mode == "offline")
++    eval_cfg = None
++    validation_config = None
++    if eval_every:
++        eval_cfg = SimpleNamespace(env=SimpleNamespace(num_envs=eval_envs, env_spacing=Cfg.env.env_spacing,
++                                                       episode_length_s=Cfg.env.episode_length_s, record_video=False),
++                                   terrain=Cfg.terrain, domain_rand=Cfg.domain_rand, commands=Cfg.commands)
++        validation_config = dict(every_iterations=eval_every, early_stopping_rounds=patience, num_envs=eval_envs,
++                                 seed=validation_seed, command_mps=T3ForwardEnv.VALIDATION_SPEED_MPS,
++                                 warmup_s=T3ForwardEnv.VALIDATION_WARMUP_S, horizon_s=T3ForwardEnv.VALIDATION_HORIZON_S,
++                                 target_distance_m=T3ForwardEnv.VALIDATION_DISTANCE_M,
++                                 fall_duration_s=T3ForwardEnv.VALIDATION_FALL_S, time_tolerance=Validation.TIME_TOLERANCE)
++    training["validation"] = validation_config
++    logger.configure(prefix=run_dir.name, root=str(run_dir.parent))
++    print(f"T3 fine-tuning on {gpu}: {num_envs} envs, {iterations} iterations, seed {seed}, "
++          f"policy LR {learning_rate:g}, {PPO_Args.num_learning_epochs} PPO epochs", flush=True)
++    print(f"Forward commands [{speed_min:g}, {speed_max:g}] m/s, straightness weight {straightness_weight:g}", flush=True)
++    env = T3ForwardEnv(sim_device=device, headless=True, cfg=Cfg, eval_cfg=eval_cfg, straightness_weight=straightness_weight)
++    training["straightness_max_step_penalty"] = env.straightness_step_weight
++    logger.log_params(AC_Args=vars(AC_Args), PPO_Args=vars(PPO_Args), RunnerArgs=vars(RunnerArgs),
++                      Cfg=vars(Cfg), training=training)
+
 -    Cfg.commands.lin_vel_x = [-1.0, 1.0]
 -    Cfg.commands.lin_vel_y = [-0.6, 0.6]
 -    Cfg.commands.ang_vel_yaw = [-1.0, 1.0]
@@ -486,73 +990,81 @@ index d6aa3d2..7c02836 100755
 -    Cfg.commands.num_bins_body_roll = 1
 -    Cfg.commands.num_bins_body_pitch = 1
 -    Cfg.commands.num_bins_stance_width = 1
--
-+    Cfg.commands.command_curriculum = False
-+    Cfg.commands.lin_vel_x = [0.1, 0.6]
-+    Cfg.commands.lin_vel_y = [0.0, 0.0]
-+    Cfg.commands.ang_vel_yaw = [0.0, 0.0]
-     Cfg.normalization.friction_range = [0, 1]
++    with ExitStack() as stack:
++        metrics_file = stack.enter_context((run_dir / "metrics.jsonl").open("x", encoding="utf-8", buffering=1))
++        wandb_run = stack.enter_context(wandb_tracking(run_dir, wandb_mode, training))
++        wandb_logging = wandb_run is not None
++        defined_metrics = set()
+
+-    Cfg.normalization.friction_range = [0, 1]
 -    Cfg.normalization.ground_friction_range = [0, 1]
 -    Cfg.terrain.yaw_init_range = 3.14
-     Cfg.normalization.clip_actions = 10.0
- 
+-    Cfg.normalization.clip_actions = 10.0
++        def report_wandb(values, step_metric):
++            nonlocal wandb_logging
++            if wandb_logging:
++                try:
++                    for name in values:
++                        if name not in defined_metrics:
++                            if name == step_metric:
++                                wandb_run.define_metric(name)
++                            else:
++                                wandb_run.define_metric(name, step_metric=step_metric)
++                            defined_metrics.add(name)
++                    wandb_run.log(values)
++                except Exception as exc:
++                    wandb_logging = False
++                    print(f"T3 W&B: Logging failed ({type(exc).__name__}). Local metrics are available.", flush=True)
+
 -    Cfg.commands.exclusive_phase_offset = False
 -    Cfg.commands.pacing_offset = False
 -    Cfg.commands.binary_phases = True
 -    Cfg.commands.gaitwise_curricula = True
--
++        def report_validation(row):
++            values = {"validation/iteration": row["iteration"]}
++            for name in ("success_rate", "median_time_to_3m_s", "median_max_cross_track_m",
++                         "worst_max_cross_track_m", "rounds_without_improvement"):
++                values[f"validation/{name}"] = row[name]
++            report_wandb(values, "validation/iteration")
+
 -    env = VelocityTrackingEasyEnv(sim_device='cuda:0', headless=False, cfg=Cfg)
--
++        validation = None
++        if validation_config is not None:
++            validation_file = stack.enter_context((run_dir / "validation.jsonl").open("x", encoding="utf-8", buffering=1))
++            validation = Validation(stream=validation_file, every=eval_every, patience=patience,
++                                    seed=validation_seed, report=report_validation)
+
 -    # log the experiment parameters
-+    # Use small updates to keep the initial walking policy while adapting to PD.
-+    PPO_Args.learning_rate = learning_rate
-+    PPO_Args.adaptation_module_learning_rate = 1e-4
-+    PPO_Args.schedule = "fixed"
-+    RunnerArgs.save_video_interval = 0
-+    RunnerArgs.save_interval = 100
-+
-+    gpu = torch.cuda.get_device_name(0)
-+    training = dict(seed=seed, num_envs=num_envs, iterations=iterations, init_weights=str(weights),
-+                    policy_learning_rate=learning_rate, adaptation_learning_rate=PPO_Args.adaptation_module_learning_rate,
-+                    ppo_epochs=PPO_Args.num_learning_epochs, mini_batches=PPO_Args.num_mini_batches,
-+                    rollout_steps=RunnerArgs.num_steps_per_env, trot=T3ForwardEnv.TROT,
-+                    commanded_forward_velocity_range=Cfg.commands.lin_vel_x, gpu=gpu, wandb_offline=use_wandb)
-+    logger.configure(prefix=run_dir.name, root=str(run_dir.parent))
-+    print(f"T3 fine-tuning on {gpu}: {num_envs} envs, {iterations} iterations, seed {seed}, "
-+          f"policy LR {learning_rate:g}, {PPO_Args.num_learning_epochs} PPO epochs", flush=True)
-+    env = T3ForwardEnv(sim_device=device, headless=True, cfg=Cfg)
-     logger.log_params(AC_Args=vars(AC_Args), PPO_Args=vars(PPO_Args), RunnerArgs=vars(RunnerArgs),
+-    logger.log_params(AC_Args=vars(AC_Args), PPO_Args=vars(PPO_Args), RunnerArgs=vars(RunnerArgs),
 -                      Cfg=vars(Cfg))
-+                      Cfg=vars(Cfg), training=training)
- 
--    env = HistoryWrapper(env)
--    gpu_id = 0
--    runner = Runner(env, device=f"cuda:{gpu_id}")
--    runner.learn(num_learning_iterations=100000, init_at_random_ep_len=True, eval_freq=100)
-+    with ExitStack() as stack:
-+        metrics_file = stack.enter_context((run_dir / "metrics.jsonl").open("x", encoding="utf-8", buffering=1))
-+        wandb_run = None
-+        if use_wandb:
-+            import wandb
- 
-+            wandb_run = stack.enter_context(wandb.init(project="robohack-t3", name=run_dir.name,
-+                                                       dir=str(run_dir), mode="offline", config=training))
- 
--if __name__ == '__main__':
--    from pathlib import Path
--    from ml_logger import logger
--    from go1_gym import MINI_GYM_ROOT_DIR
 +        def report_iteration(metrics):
 +            metrics_file.write(json.dumps(metrics, allow_nan=False) + "\n")
 +            print(f"PPO {metrics['iteration']}/{iterations} | {metrics['iteration_seconds']:.2f}s/iter | "
 +                  f"{metrics['env_steps_per_second']:.0f} env steps/s | reward {metrics['reward_mean']:.3f} | "
 +                  f"forward RMSE {metrics['forward_velocity_rmse_mps']:.3f} m/s", flush=True)
-+            if wandb_run is not None:
-+                wandb_run.log(metrics, step=metrics["iteration"])
-+
++            report_wandb(metrics, "iteration")
+
+-    env = HistoryWrapper(env)
+-    gpu_id = 0
+-    runner = Runner(env, device=f"cuda:{gpu_id}")
+-    runner.learn(num_learning_iterations=100000, init_at_random_ep_len=True, eval_freq=100)
 +        runner = Runner(HistoryWrapper(env), device=device, init_weights=weights, checkpoint_dir=run_dir / "checkpoints")
-+        runner.learn(num_learning_iterations=iterations, init_at_random_ep_len=True, iteration_callback=report_iteration)
- 
++        runner.learn(num_learning_iterations=iterations, init_at_random_ep_len=True,
++                     iteration_callback=report_iteration, validation=validation)
++        if validation is not None:
++            summary = dict(configuration=validation_config,
++                           **validation.summary(iterations=runner.current_learning_iteration, requested=iterations))
++            print(f"Isaac validation selected {summary['selected_checkpoint']}: "
++                  f"{summary['selection_reason']} after {summary['iterations_completed']} updates", flush=True)
++            (run_dir / "validation-summary.json").write_text(json.dumps(summary, indent=2, allow_nan=False) + "\n",
++                                                            encoding="utf-8")
+
+
+-if __name__ == '__main__':
+-    from pathlib import Path
+-    from ml_logger import logger
+-    from go1_gym import MINI_GYM_ROOT_DIR
+-
 -    stem = Path(__file__).stem
 -    logger.configure(logger.utcnow(f'gait-conditioned-agility/%Y-%m-%d/{stem}/%H%M%S.%f'),
 -                     root=Path(f"{MINI_GYM_ROOT_DIR}/runs").resolve(), )
@@ -583,7 +1095,7 @@ index d6aa3d2..7c02836 100755
 -                - yKey: adaptation_loss/mean
 -                  xKey: iterations
 -                """, filename=".charts.yml", dedent=True)
- 
+-
 -    # to see the environment rendering, set headless=False
 -    train_go1(headless=False)
 +if __name__ == "__main__":
